@@ -19,7 +19,9 @@ Press the leader key (default `ctrl+space`), then tap a short key sequence to tr
   "sequenceTimeoutMs": 750,
 
   // Visual indicator during leader mode (default: "grayedOut").
-  // "grayedOut" — dim the entire editor via ANSI faint
+  // "grayedOut" — gray the mounted editor (pi's own or a custom one);
+  //              falls back to the LEADER status line when nothing focused
+  //              is an editor
   // "none"      — static LEADER status indicator
   // Legacy "spinner" values coerce to "grayedOut"
   "editorEffect": "grayedOut",
@@ -73,4 +75,6 @@ Test command and dev-install workflow: README, "Development". Facts the README d
 
 - Config bootstrap (`ensureConfig()` in logic.ts, runs at extension load): missing file → writes defaults; existing file (even an invalid one) → never touched; write failure → in-memory defaults, extension keeps working.
 - Keep `logic.ts` free of pi imports — the test suite loads it standalone under tsx, where `@earendil-works/pi-*` don't resolve. The peers are declared in `package.json` and resolved by pi at runtime.
-- TUI components split across the peers: containers/widgets (`Container`, `Text`, `SelectList`, `Editor`, `fuzzyFilter`, …) come from `@earendil-works/pi-tui`; chrome (`DynamicBorder`, `CustomEditor`) comes from `@earendil-works/pi-coding-agent`. The LSP cannot resolve the peers, so a wrong-package import looks clean — verify exports with `node --input-type=module -e "console.log(typeof (await import('PKG')).NAME)"`.
+- TUI components split across the peers: containers/widgets (`Container`, `Text`, `SelectList`, `Editor`, `fuzzyFilter`, …) come from `@earendil-works/pi-tui`; chrome (`DynamicBorder`) comes from `@earendil-works/pi-coding-agent`. The LSP cannot resolve the peers, so a wrong-package import looks clean — verify exports with `node --input-type=module -e "console.log(typeof (await import('PKG')).NAME)"`.
+- Leader mode never swaps the editor out. `ui.custom()` without `overlay: true` replaces the editor container, so the capture overlay renders `tui.getFocusedComponent()` itself (`focusedEditor()` in `logic.ts`) — that is both why the mounted editor has to be captured *inside* the overlay factory and why graying it needs no `setEditorComponent`. `getFocusedComponent()` is declared on pi-tui's abstract `TuiBase`, not on the `TUI` interface pi types the handle as, hence the guarded lookup.
+- Graying wraps each rendered line in `ESC[90m` (bright black), not `ESC[2m` (faint): faint only lightens the default foreground, so themed borders and colored text come through untouched. `borderColor` is muted around the `render()` call (`renderEditor()`) and deleted again afterwards when the editor had no border of its own.

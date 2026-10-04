@@ -92,7 +92,7 @@ Walks you through a binding in one overlay: pick a type (`command` / `action` / 
 | `leaderKey` | `"ctrl+space"` | Combination that activates leader mode. Restart pi after changing it. |
 | `leaderTimeoutMs` | `3600` | How long leader mode stays active before timing out. |
 | `sequenceTimeoutMs` | `750` | Max wait between keystrokes in a multi-key sequence. Also the delay before a prefix binding fires (see below). |
-| `editorEffect` | `"grayedOut"` | Visual indicator while leader mode is active: `"grayedOut"` dims the editor, `"none"` shows a static `LEADER` status instead. |
+| `editorEffect` | `"grayedOut"` | Visual indicator while leader mode is active: `"grayedOut"` grays out whichever editor is mounted — pi's own or a custom one — and falls back to a static `LEADER` status when no editor has focus. `"none"` always shows the `LEADER` status. |
 | `bindings` | `{}` | Sequence → binding. Empty by default; the leader key warns until you add some. |
 
 Invalid values fall back to defaults, and malformed binding entries are ignored — a typo in one binding can't break the rest.

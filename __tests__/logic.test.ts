@@ -45,6 +45,10 @@ import {
     saveBinding,
     validateSequence,
     type PiCommand,
+    type MountedEditor,
+    focusedEditor,
+    isMountedEditor,
+    renderEditor,
 } from "../logic.ts";
 
 // Isolated temp config dir — the suite never touches the user's real config.
@@ -1482,7 +1486,188 @@ section("dispatchPlan");
     );
 }
 
-section("stripAnsi + capOutput");
+// ---------------------------------------------------------------------------
+// Mounted editor: detection, focus lookup, gray rendering
+// ---------------------------------------------------------------------------
+
+section("isMountedEditor");
+
+/** A stand-in for a mounted editor: renders lines, holds text. */
+function fakeEditor(lines: string[] = ["one", "two"]): MountedEditor {
+    let text = "";
+    return {
+        render: (width: number) => lines.map((l) => `${l}:${width}`),
+        setText: (value: string) => {
+            text = value;
+        },
+        getText: () => text,
+    };
+}
+
+assert(isMountedEditor(fakeEditor()), "an editor-shaped object is an editor");
+assertEq(isMountedEditor(null), false, "null is not an editor");
+assertEq(isMountedEditor(undefined), false, "undefined is not an editor");
+assertEq(isMountedEditor("editor"), false, "a string is not an editor");
+assertEq(
+    isMountedEditor({ render: (w: number) => [`${w}`] }),
+    false,
+    "render alone is not enough — a selector renders too",
+);
+assertEq(
+    isMountedEditor({ setText: () => {}, getText: () => "" }),
+    false,
+    "no render means not an editor",
+);
+assert(
+    !isMountedEditor({ render: 1, setText: () => {}, getText: () => "" }),
+    "non-function render is rejected",
+);
+assertEq(
+    isMountedEditor(Object.create({ render: () => [], setText: () => {}, getText: () => "" })),
+    true,
+    "inherited methods still make an editor",
+);
+
+section("focusedEditor");
+
+const editor = fakeEditor();
+assertEq(
+    focusedEditor({ getFocusedComponent: () => editor }),
+    editor,
+    "focused editor is returned as-is",
+);
+assertEq(
+    focusedEditor({ getFocusedComponent: () => ({ render: () => [] }) }),
+    null,
+    "a focused non-editor component yields null",
+);
+assertEq(
+    focusedEditor({ getFocusedComponent: () => null }),
+    null,
+    "no focus yields null",
+);
+assertEq(
+    focusedEditor({ getFocusedComponent: 42 }),
+    null,
+    "a non-callable getFocusedComponent yields null",
+);
+assertEq(focusedEditor({}), null, "TUI without the method yields null");
+assertEq(focusedEditor(null), null, "null TUI yields null");
+assertEq(
+    focusedEditor({
+        getFocusedComponent(this: { marker: string }) {
+            return this.marker === "editor" ? editor : null;
+        },
+        marker: "editor",
+    }),
+    editor,
+    "getFocusedComponent is called with the TUI as `this`",
+);
+
+section("renderEditor");
+
+const plain = fakeEditor(["a", "b"]);
+assertEq(
+    renderEditor(plain, 40, { dim: false }),
+    ["a:40", "b:40"],
+    "dim off renders the editor untouched",
+);
+assertEq(
+    renderEditor(plain, 40, {
+        dim: false,
+        borderColor: () => "MUTED",
+    }),
+    ["a:40", "b:40"],
+    "dim off leaves borderColor alone",
+);
+
+const dimmed = renderEditor(plain, 40, {
+    dim: true,
+    borderColor: () => "MUTED",
+});
+assertEq(dimmed.length, 2, "dim keeps the editor's line count");
+assert(
+    dimmed.every((line) => line.startsWith("\u001B[90m") && line.endsWith("\u001B[0m")),
+    `every line is wrapped in gray: ${JSON.stringify(dimmed)}`,
+);
+assert(
+    dimmed[0].includes("a:40"),
+    "grayed lines still carry the editor's own output",
+);
+
+assertEq(
+    renderEditor(plain, 40, { dim: true }),
+    ["\u001B[90ma:40\u001B[0m", "\u001B[90mb:40\u001B[0m"],
+    "dim without borderColor still grays",
+);
+
+// Border colour is swapped around the render and put back.
+let seenDuringRender: unknown;
+const bordered: MountedEditor = {
+    ...fakeEditor(["x"]),
+    render(width: number) {
+        seenDuringRender = this.borderColor?.("> ");
+        return [`x:${width}`];
+    },
+    borderColor: (text: string) => `own(${text})`,
+};
+const out = renderEditor(bordered, 10, {
+    dim: true,
+    borderColor: (text: string) => `muted(${text})`,
+});
+assertEq(seenDuringRender, "muted(> )", "border is muted during the render");
+assertEq(
+    bordered.borderColor?.("> "),
+    "own(> )",
+    "the editor's own border colour is restored",
+);
+assertEq(out, ["\u001B[90mx:10\u001B[0m"], "bordered editor renders gray");
+
+// An editor that had no borderColor must not keep one afterwards.
+const unbordered: MountedEditor = {
+    ...fakeEditor(["y"]),
+    render(width: number) {
+        return [`y:${width}`];
+    },
+};
+assertEq(
+    "borderColor" in unbordered,
+    false,
+    "the fake editor starts without a border",
+);
+renderEditor(unbordered, 10, {
+    dim: true,
+    borderColor: () => "<muted>",
+});
+assertEq(
+    "borderColor" in unbordered,
+    false,
+    "no borderColor is left behind on an editor that had none",
+);
+
+// A throwing render must still restore the border.
+const thrower: MountedEditor = {
+    ...fakeEditor(),
+    render: () => {
+        throw new Error("boom");
+    },
+    borderColor: (text: string) => `own(${text})`,
+};
+let threw = false;
+try {
+    renderEditor(thrower, 10, {
+        dim: true,
+        borderColor: () => "<muted>",
+    });
+} catch {
+    threw = true;
+}
+assert(threw, "a render failure propagates");
+assertEq(
+    thrower.borderColor?.("> "),
+    "own(> )",
+    "the border colour is restored even when the render throws",
+);
 
 {
     assertEq(stripAnsi("\u001B[31mred\u001B[0m"), "red", "CSI color stripped");
@@ -1502,6 +1687,8 @@ section("stripAnsi + capOutput");
 }
 
 rmSync(CONFIG_DIR, { recursive: true, force: true });
+
+section("stripAnsi + capOutput");
 
 console.log(`\n${"─".repeat(40)}`);
 console.log(`Passed: ${passed}  Failed: ${failed}`);

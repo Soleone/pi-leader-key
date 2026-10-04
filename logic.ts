@@ -421,6 +421,96 @@ const ANSI_RE = new RegExp(
     "g",
 );
 
+/**
+ * The slice of a mounted editor component the leader extension needs.
+ *
+ * Structural on purpose: whichever editor pi has mounted satisfies it —
+ * pi's own CustomEditor, or one installed by another extension. The
+ * extension never swaps the editor out, so a user's custom editor stays
+ * mounted (and keeps its own key handling, autocomplete, and hooks).
+ */
+export type MountedEditor = {
+    render(width: number): string[];
+    invalidate?(): void;
+    setText(text: string): void;
+    getText(): string;
+    /** pi's editors resolve this with the submit handler's own work. */
+    onSubmit?(value: string): void | Promise<void>;
+    /** Present on pi's editors; absent on a plain pi-tui Component. */
+    borderColor?: (text: string) => string;
+    /** pi-tui keeps this private; present at runtime, used as a fast path. */
+    submitValue?(): void;
+};
+
+/**
+ * True when a focused component is an editor we can render and drive.
+ *
+ * Leader mode reads this off `tui.getFocusedComponent()`, which pi points
+ * at the mounted editor. It can also be something else — a selector, a
+ * custom widget with focus — so callers need a guard rather than a cast.
+ */
+export function isMountedEditor(value: unknown): value is MountedEditor {
+    if (typeof value !== "object" || value === null) return false;
+    const candidate = value as Partial<MountedEditor>;
+    return (
+        typeof candidate.render === "function" &&
+        typeof candidate.setText === "function" &&
+        typeof candidate.getText === "function"
+    );
+}
+
+/**
+ * The focused component of a TUI, when that component is an editor.
+ *
+ * pi types the TUI it passes to `ui.custom` as pi-tui's `TUI` interface,
+ * which leaves out `getFocusedComponent()` — the method is declared on the
+ * abstract `TuiBase` class that pi actually constructs. Read it through a
+ * local view so this compiles, and return null when it is absent rather
+ * than assuming.
+ */
+export function focusedEditor(tui: unknown): MountedEditor | null {
+    if (typeof tui !== "object" || tui === null) return null;
+    const getFocused = (tui as { getFocusedComponent?: () => unknown })
+        .getFocusedComponent;
+    if (typeof getFocused !== "function") return null;
+    const focused = getFocused.call(tui);
+    return isMountedEditor(focused) ? focused : null;
+}
+
+/** ANSI bright black: recedes without washing out, and resets cleanly. */
+const GRAY = "\x1b[90m";
+const RESET_SGR = "\x1b[0m";
+
+/**
+ * Render a mounted editor, optionally grayed out for leader mode.
+ *
+ * Lines are wrapped in bright black rather than faint (`ESC[2m`): faint
+ * only lightens the default foreground, so a themed border or coloured
+ * text would come through untouched. `borderColor` is muted for the same
+ * duration — the editor renders lazily, so it has to be swapped around the
+ * call rather than set once — and restored afterwards, including deleting
+ * it again when the editor had no border of its own.
+ */
+export function renderEditor(
+    editor: MountedEditor,
+    width: number,
+    opts: { dim: boolean; borderColor?: (text: string) => string },
+): string[] {
+    if (!opts.dim) return editor.render(width);
+    const hadBorder = "borderColor" in editor;
+    const previous = editor.borderColor;
+    try {
+        if (opts.borderColor) editor.borderColor = opts.borderColor;
+        return editor.render(width).map((line) => `${GRAY}${line}${RESET_SGR}`);
+    } finally {
+        if (opts.borderColor) {
+            if (hadBorder)
+                editor.borderColor = previous as (text: string) => string;
+            else delete (editor as { borderColor?: unknown }).borderColor;
+        }
+    }
+}
+
 /** Strip terminal control sequences from command output. */
 export function stripAnsi(s: string): string {
     return s.replace(ANSI_RE, "");

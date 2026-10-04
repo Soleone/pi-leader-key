@@ -65,12 +65,10 @@
  */
 
 import {
-    CustomEditor,
     DynamicBorder,
     type ExtensionAPI,
     type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
 import {
     Container,
     matchesKey,
@@ -83,12 +81,14 @@ import {
     CONFIG_PATH,
     dispatchPlan,
     ensureConfig,
+    focusedEditor,
     isPrintableKey,
     loadConfig,
     processKey,
+    renderEditor,
     shouldRestoreDraft,
-    type EditorEffect,
     type LeaderConfig,
+    type MountedEditor,
 } from "./logic.ts";
 import { makeCommandPicker, runBindingWizard } from "./wizard.ts";
 
@@ -120,11 +120,17 @@ export default function (pi: ExtensionAPI) {
     // State
     // ------------------------------------------------------------------
 
-    let activeTui: TUI | undefined;
-    let leaderEditor: CustomEditor | null = null;
-    let activeEffect: EditorEffect | null = null;
+    /**
+     * The editor pi has mounted, captured when the capture overlay opens
+     * (that is when the TUI can still name it). Left null when focus is
+     * not on an editor, in which case leader mode falls back to the
+     * LEADER status line.
+     */
+    let activeEditor: MountedEditor | null = null;
     /** True while a leader press is in flight — pi fires shortcuts without awaiting. */
     let capturing = false;
+    /** One warning per session: leader mode found no editor to gray. */
+    let warnedNoEditor = false;
 
     /**
      * Surface config problems once per session rather than on every press:
@@ -162,9 +168,11 @@ export default function (pi: ExtensionAPI) {
      * so the real handler's return value stays awaitable; if a future pi
      * drops submitValue, fall back to calling onSubmit directly.
      */
-    function submitViaEditor(editor: CustomEditor | null): Promise<unknown> {
-        if (!editor) return Promise.resolve(undefined);
-        let pending: unknown;
+    function submitViaEditor(
+        editor: MountedEditor | null,
+    ): Promise<void> {
+        if (!editor) return Promise.resolve();
+        let pending: void | Promise<void> = undefined;
         const original = editor.onSubmit;
         editor.onSubmit = (value) => {
             pending = original?.(value);
@@ -180,7 +188,7 @@ export default function (pi: ExtensionAPI) {
         } finally {
             editor.onSubmit = original;
         }
-        return Promise.resolve(pending);
+        return Promise.resolve(pending).then(() => undefined);
     }
 
     // ------------------------------------------------------------------
@@ -188,20 +196,11 @@ export default function (pi: ExtensionAPI) {
     // ------------------------------------------------------------------
 
     pi.on("session_shutdown", () => {
-        activeEffect = null;
-        activeTui = undefined;
-        leaderEditor = null;
+        activeEditor = null;
     });
 
     pi.on("session_start", (_event, ctx) => {
         reportConfigProblems(ctx);
-        if (ctx.mode !== "tui") return;
-
-        ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-            activeTui = tui;
-            leaderEditor = new CustomEditor(tui, theme, keybindings);
-            return leaderEditor;
-        });
     });
 
     // ------------------------------------------------------------------
@@ -213,7 +212,28 @@ export default function (pi: ExtensionAPI) {
         current: LeaderConfig,
     ): Promise<string | null> {
         return ctx.ui.custom<string | null>(
-            (_tui, theme, _keybindings, done) => {
+            (tui, theme, _keybindings, done) => {
+                // Whatever editor pi has mounted — its own or a custom one
+                // from another extension — is still the focused component at
+                // this point, and it stays mounted behind this overlay. Gray
+                // it in place instead of swapping in a look-alike, so nothing
+                // about the editor changes when leader mode opens.
+                activeEditor = focusedEditor(tui);
+                const wantsDim = current.editorEffect === "grayedOut";
+                const dimmed = wantsDim && activeEditor !== null;
+                if (!dimmed) {
+                    // Nothing to gray — either not asked for, or no editor has
+                    // focus — so the status line carries the indicator.
+                    if (wantsDim && !warnedNoEditor) {
+                        warnedNoEditor = true;
+                        ctx.ui.notify(
+                            "Leader mode found no editor to gray — falling back to the LEADER indicator.",
+                            "warning",
+                        );
+                    }
+                    ctx.ui.setStatus("leader", "LEADER");
+                }
+
                 let buffer = "";
                 let leaderTimer: ReturnType<typeof setTimeout> | null = null;
                 let sequenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -240,23 +260,16 @@ export default function (pi: ExtensionAPI) {
 
                 return {
                     render(width: number): string[] {
-                        if (!leaderEditor) return [""];
-                        if (activeEffect === "grayedOut") {
-                            const saved = leaderEditor.borderColor;
-                            try {
-                                leaderEditor.borderColor = (s: string) =>
-                                    theme.fg("muted", s);
-                                return leaderEditor
-                                    .render(width)
-                                    .map((line) => `\x1b[90m${line}\x1b[0m`);
-                            } finally {
-                                leaderEditor.borderColor = saved;
-                            }
-                        }
-                        return leaderEditor.render(width);
+                        // renderEditor() owns the graying: no editor, no
+                        // lines, and nothing to gray.
+                        if (!activeEditor) return [""];
+                        return renderEditor(activeEditor, width, {
+                            dim: dimmed,
+                            borderColor: (s: string) => theme.fg("muted", s),
+                        });
                     },
                     invalidate(): void {
-                        leaderEditor?.invalidate();
+                        activeEditor?.invalidate?.();
                     },
                     // The host drops overlays on a session switch without
                     // resolving them, so the timers have to die here too.
@@ -312,15 +325,26 @@ export default function (pi: ExtensionAPI) {
 
         const plan = dispatchPlan(binding);
         if (plan.kind === "command") {
+            // Submitting means driving the mounted editor's own handler,
+            // which needs the instance the overlay captured. With no editor
+            // focused there is nothing to submit into, and silently typing
+            // the command somewhere else would be worse than saying so.
+            if (!activeEditor) {
+                ctx.ui.notify(
+                    "That leader command needs the editor focused.",
+                    "warning",
+                );
+                return;
+            }
             const submitted = plan.text;
-            // Snapshot through the UI accessor, not leaderEditor.getText():
+            // Snapshot through the UI accessor, not activeEditor.getText():
             // a large paste is stored collapsed as a marker, getText()
             // returns that marker, and getEditorText() expands it.
             // Restoring the marker after submitValue() wiped the paste map
             // would lose the pasted text for good.
             const draft = ctx.ui.getEditorText();
-            leaderEditor?.setText(submitted);
-            await submitViaEditor(leaderEditor);
+            ctx.ui.setEditorText(submitted);
+            await submitViaEditor(activeEditor);
             // Give the draft back unless the command left new text behind.
             if (shouldRestoreDraft(ctx.ui.getEditorText(), submitted)) {
                 ctx.ui.setEditorText(draft);
@@ -517,27 +541,19 @@ export default function (pi: ExtensionAPI) {
                     return;
                 }
 
-                const dimmed = current.editorEffect === "grayedOut";
-
-                // ---- Activate visual indicator ----
-                if (dimmed) {
-                    activeEffect = "grayedOut";
-                    activeTui?.requestRender();
-                } else {
-                    ctx.ui.setStatus("leader", "LEADER");
-                }
+                // The overlay captures the mounted editor and renders it
+                // grayed; when there is no editor to gray it puts up the
+                // LEADER status line itself.
 
                 try {
                     const result = await runEffectCapture(ctx, current);
                     if (typeof result === "string")
                         await dispatchBinding(ctx, current, result);
                 } finally {
-                    // Always clear the indicator: a throw in the overlay or
-                    // the dispatch must not leave the editor dimmed.
-                    if (dimmed) {
-                        activeEffect = null;
-                        activeTui?.requestRender();
-                    }
+                    // Drop the editor reference and the indicator: the next
+                    // press recaptures both, and a throw in the overlay or
+                    // the dispatch must not leave LEADER on screen.
+                    activeEditor = null;
                     ctx.ui.setStatus("leader", undefined);
                 }
             } finally {
