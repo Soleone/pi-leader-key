@@ -432,6 +432,9 @@ const ANSI_RE = new RegExp(
 export type MountedEditor = {
     render(width: number): string[];
     invalidate?(): void;
+    // pi's EditorComponent contract; the extension talks to the editor
+    // through ctx.ui, but the guard needs them to tell an editor apart
+    // from any other component that can render.
     setText(text: string): void;
     getText(): string;
     /** pi's editors resolve this with the submit handler's own work. */
@@ -462,9 +465,11 @@ export function isMountedEditor(value: unknown): value is MountedEditor {
  *
  * pi types the TUI it passes to `ui.custom` as pi-tui's `TUI` interface,
  * which leaves out `getFocusedComponent()` — the method is declared on the
- * abstract `TuiBase` class that pi actually constructs. Read it through a
- * local view so this compiles, and return null when it is absent rather
- * than assuming.
+ * abstract `TuiBase` class that pi actually constructs. What arrives is a
+ * Proxy around that instance whose get trap forwards with `Reflect.get(tui,
+ * property, tui)` and whose wrapped methods ignore their `this`, so the
+ * lookup below works unchanged; call it with the reference as the receiver
+ * anyway. Return null when the method is absent rather than assuming.
  */
 export function focusedEditor(tui: unknown): MountedEditor | null {
     if (typeof tui !== "object" || tui === null) return null;
@@ -473,6 +478,26 @@ export function focusedEditor(tui: unknown): MountedEditor | null {
     if (typeof getFocused !== "function") return null;
     const focused = getFocused.call(tui);
     return isMountedEditor(focused) ? focused : null;
+}
+
+/**
+ * What leader mode should show while a sequence is being typed.
+ *
+ * Pure so the choice is testable outside a TUI: gray the editor when the
+ * config asks for it and an editor is actually there, otherwise put up
+ * the status line. `warnNoEditor` fires once for the session so the user
+ * learns the gray never happens instead of wondering about it.
+ */
+export function leaderIndicator(
+    effect: EditorEffect,
+    hasEditor: boolean,
+): { dim: boolean; status: "LEADER" | undefined; warnNoEditor: boolean } {
+    const dim = effect === "grayedOut" && hasEditor;
+    return {
+        dim,
+        status: dim ? undefined : "LEADER",
+        warnNoEditor: effect === "grayedOut" && !hasEditor,
+    };
 }
 
 /** ANSI bright black: recedes without washing out, and resets cleanly. */
@@ -486,8 +511,13 @@ const RESET_SGR = "\x1b[0m";
  * only lightens the default foreground, so a themed border or coloured
  * text would come through untouched. `borderColor` is muted for the same
  * duration — the editor renders lazily, so it has to be swapped around the
- * call rather than set once — and restored afterwards, including deleting
- * it again when the editor had no border of its own.
+ * call rather than set once — and restored afterwards, deleting it again
+ * when the editor had no usable border of its own.
+ *
+ * Wrapping sets the foreground of whatever the editor draws, so a custom
+ * editor that colours its own text (a selection highlight keeps its
+ * background but takes the gray foreground) reads dimmer than it looks.
+ * That is the cost of graying someone else's editor; `"none"` opts out.
  */
 export function renderEditor(
     editor: MountedEditor,
@@ -495,18 +525,70 @@ export function renderEditor(
     opts: { dim: boolean; borderColor?: (text: string) => string },
 ): string[] {
     if (!opts.dim) return editor.render(width);
-    const hadBorder = "borderColor" in editor;
+    // Read what the editor will use, and only write where a write can
+    // actually land: see borderAccess() for why that is not a given.
     const previous = editor.borderColor;
+    const access = opts.borderColor ? borderAccess(editor) : "read-only";
     try {
-        if (opts.borderColor) editor.borderColor = opts.borderColor;
+        if (opts.borderColor && access !== "read-only")
+            editor.borderColor = opts.borderColor;
         return editor.render(width).map((line) => `${GRAY}${line}${RESET_SGR}`);
     } finally {
-        if (opts.borderColor) {
-            if (hadBorder)
-                editor.borderColor = previous as (text: string) => string;
-            else delete (editor as { borderColor?: unknown }).borderColor;
-        }
+        if (opts.borderColor) restoreBorder(editor, previous, access);
     }
+}
+
+/** How `borderColor` on this editor can be written, if at all. */
+type BorderAccess = "own" | "setter" | "read-only";
+
+/**
+ * `borderColor` reaches us as a plain property on a class instance, but what
+ * is underneath it varies: an own field, a prototype method, a getter from a
+ * base class. Each takes a different write, and writing to the wrong one is
+ * worse than not graying the border — a getter with no setter throws straight
+ * out of render() and takes the frame with it.
+ */
+function borderAccess(editor: MountedEditor): BorderAccess {
+    const own = Object.getOwnPropertyDescriptor(editor, "borderColor");
+    if (own) {
+        if (own.set) return "setter";
+        return own.get || !own.writable ? "read-only" : "own";
+    }
+    for (
+        let proto: object | null = Object.getPrototypeOf(editor);
+        proto;
+        proto = Object.getPrototypeOf(proto)
+    ) {
+        const inherited = Object.getOwnPropertyDescriptor(proto, "borderColor");
+        // A setter owns the value; a getter without one owns the rendering.
+        if (inherited) return inherited.set ? "setter" : "read-only";
+    }
+    // Nothing in the chain: an assignment would just create the property.
+    return "own";
+}
+
+/**
+ * Put back the border renderEditor() took away, or take back the one it set
+ * when there is nothing to restore. An own field holding `undefined` — what a
+ * class field looks like under useDefineForClassFields — counts as no border,
+ * because restoring it would leave the editor borderless for the rest of the
+ * session.
+ */
+function restoreBorder(
+    editor: MountedEditor,
+    previous: unknown,
+    access: BorderAccess,
+): void {
+    if (access === "read-only") return;
+    const target = editor as { borderColor?: unknown };
+    // Through a setter the value lives wherever the setter puts it, so the
+    // only way back is another write.
+    if (access === "setter" || typeof previous === "function") {
+        target.borderColor = previous;
+        return;
+    }
+    if (Object.getOwnPropertyDescriptor(editor, "borderColor")?.configurable)
+        delete target.borderColor;
 }
 
 /** Strip terminal control sequences from command output. */

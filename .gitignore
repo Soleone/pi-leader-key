@@ -4,3 +4,4 @@ leader-key.json
 node_modules/
 *.tgz
 .agents/
+skills-lock.json

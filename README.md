@@ -60,7 +60,7 @@ Anything you can type after `/` can go behind a key sequence — including comma
 }
 ```
 
-Command bindings run through pi's full editor submit pipeline, exactly as if you had typed the text and pressed Enter — so arguments work too. Put them in the explicit `args` field; the two forms below dispatch byte-identically (`"/model opus"`), and the legacy embedded form keeps loading so existing configs don't break:
+Command bindings run through pi's full editor submit pipeline, exactly as if you had typed the text and pressed Enter — so arguments work too. Put them in the explicit `args` field; the two forms below dispatch byte-identically (`"/model opus"`), and the legacy embedded form keeps loading so existing configs don't break. (pi declines a submit while the editor still holds text, so a `command` binding waits until the box is empty. `action` and `exec` bindings are unaffected — they never go through the editor.)
 
 > [!TIP]
 > Don't guess at command names — run `/leader-commands` to browse everything invokable in your current session, or `/leader-bind` to pick one and bind it in a single flow.
@@ -107,7 +107,7 @@ Invalid values fall back to defaults, and malformed binding entries are ignored 
 | `exec` | `{ "exec": "git status" }` | Runs via `bash -c` (15s timeout); output shown as a notification, capped at 2KB |
 
 > [!NOTE]
-> `command` + `args` dispatches the composed string (`command + " " + args`) through the same handler a manual Enter press triggers. Args are opaque: edges trimmed, interior kept verbatim; a legacy `"/model  opus"` (double space) normalizes to `"/model opus"`. Unknown command names pass through untouched — the binding fires against whatever is registered that session, so a command from a removed package simply does nothing until the package is back. Composition, normalization, and draft-restore against the composed string are exercised by the automated dispatch matrix (`npx tsx __tests__/dispatch-matrix.test.ts`: built-in + args, extension + args, skill ref, prompt template + args, unknown-command passthrough, double-space normalization); if a command behaves differently bound than typed, please file an issue.
+> `command` + `args` dispatches the composed string (`command + " " + args`) through the same handler a manual Enter press triggers. Args are opaque: edges trimmed, interior kept verbatim; a legacy `"/model  opus"` (double space) normalizes to `"/model opus"`. Unknown command names pass through untouched — the binding fires against whatever is registered that session, so a command from a removed package simply does nothing until the package is back. Composition, normalization, and draft-restore against the composed string are exercised by the automated dispatch matrix in `__tests__/logic.test.ts` (section `dispatchPlan`: built-in + args, the three actions, exec verbatim, unknown/blank bindings, the unnormalized legacy form, and the four draft-restore outcomes) with `__tests__/editor-integration.test.ts` covering the same helpers against pi's real editor; if a command behaves differently bound than typed, please file an issue.
 
 ### Sequences
 

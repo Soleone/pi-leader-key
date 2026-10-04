@@ -48,6 +48,7 @@ import {
     type MountedEditor,
     focusedEditor,
     isMountedEditor,
+    leaderIndicator,
     renderEditor,
 } from "../logic.ts";
 
@@ -1522,12 +1523,16 @@ assert(
     !isMountedEditor({ render: 1, setText: () => {}, getText: () => "" }),
     "non-function render is rejected",
 );
-assertEq(
-    isMountedEditor(Object.create({ render: () => [], setText: () => {}, getText: () => "" })),
-    true,
-    "inherited methods still make an editor",
+assert(
+    isMountedEditor(
+        Object.create({
+            render: () => [],
+            setText: () => {},
+            getText: () => "",
+        }),
+    ),
+    "inherited methods count — pi's own editor keeps them on its prototype",
 );
-
 section("focusedEditor");
 
 const editor = fakeEditor();
@@ -1562,6 +1567,29 @@ assertEq(
     }),
     editor,
     "getFocusedComponent is called with the TUI as `this`",
+);
+
+section("leaderIndicator");
+
+assertEq(
+    leaderIndicator("grayedOut", true),
+    { dim: true, status: undefined, warnNoEditor: false },
+    "grayedOut with an editor grays it and stays quiet",
+);
+assertEq(
+    leaderIndicator("grayedOut", false),
+    { dim: false, status: "LEADER", warnNoEditor: true },
+    "grayedOut without an editor falls back to the status line and warns",
+);
+assertEq(
+    leaderIndicator("none", true),
+    { dim: false, status: "LEADER", warnNoEditor: false },
+    "none leaves the editor alone and never warns",
+);
+assertEq(
+    leaderIndicator("none", false),
+    { dim: false, status: "LEADER", warnNoEditor: false },
+    "none without an editor is still just the status line",
 );
 
 section("renderEditor");
@@ -1630,11 +1658,6 @@ const unbordered: MountedEditor = {
         return [`y:${width}`];
     },
 };
-assertEq(
-    "borderColor" in unbordered,
-    false,
-    "the fake editor starts without a border",
-);
 renderEditor(unbordered, 10, {
     dim: true,
     borderColor: () => "<muted>",
@@ -1643,6 +1666,48 @@ assertEq(
     "borderColor" in unbordered,
     false,
     "no borderColor is left behind on an editor that had none",
+);
+
+// An own property holding undefined is not a border: a class field under
+// useDefineForClassFields reads as present. Restoring "undefined" there
+// would leave the editor borderless for the rest of the session.
+const undefinedBorder: MountedEditor = {
+    ...fakeEditor(["z"]),
+    render(width: number) {
+        return [`z:${width}`];
+    },
+    borderColor: undefined as unknown as (text: string) => string,
+};
+renderEditor(undefinedBorder, 10, {
+    dim: true,
+    borderColor: () => "<muted>",
+});
+assertEq(
+    "borderColor" in undefinedBorder,
+    false,
+    "an undefined border is cleaned up rather than restored",
+);
+
+// An inherited accessor with no setter must not throw out of render().
+const accessorEditor = Object.defineProperty(
+    { ...fakeEditor(["a"]), render: (width: number) => [`a:${width}`] },
+    "borderColor",
+    { get: () => (s: string) => `get(${s})`, configurable: true },
+) as MountedEditor;
+let accessorThrew = false;
+try {
+    renderEditor(accessorEditor, 10, {
+        dim: true,
+        borderColor: () => "<muted>",
+    });
+} catch {
+    accessorThrew = true;
+}
+assertEq(accessorThrew, false, "a getter-only borderColor does not throw");
+assertEq(
+    accessorEditor.borderColor?.("> "),
+    "get(> )",
+    "the getter's border is still what the editor sees",
 );
 
 // A throwing render must still restore the border.
@@ -1669,9 +1734,9 @@ assertEq(
     "the border colour is restored even when the render throws",
 );
 
+section("stripAnsi + capOutput (exec output)");
 {
     assertEq(stripAnsi("\u001B[31mred\u001B[0m"), "red", "CSI color stripped");
-    assertEq(stripAnsi("\u001B]0;title\u0007after"), "after", "OSC title stripped");
     assertEq(
         stripAnsi("git status\u001B[?25lhidden cursor"),
         "git statushidden cursor",

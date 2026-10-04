@@ -45,8 +45,10 @@
  *
  * ## editorEffect values
  *
- *   "grayedOut" — Dim the entire editor via ANSI faint (default)
- *   "none"      — No visual indicator; fallback LEADER status
+ *   "grayedOut" — Gray the mounted editor (pi's own or a custom one) while
+ *     leader mode is open (default). Falls back to the LEADER status line
+ *     when no editor has focus.
+ *   "none"      — LEADER status line only; the editor is left alone.
  *
  * ## Binding types
  *
@@ -83,6 +85,7 @@ import {
     ensureConfig,
     focusedEditor,
     isPrintableKey,
+    leaderIndicator,
     loadConfig,
     processKey,
     renderEditor,
@@ -129,7 +132,7 @@ export default function (pi: ExtensionAPI) {
     let activeEditor: MountedEditor | null = null;
     /** True while a leader press is in flight — pi fires shortcuts without awaiting. */
     let capturing = false;
-    /** One warning per session: leader mode found no editor to gray. */
+    /** One warning per extension load: leader mode found no editor to gray. */
     let warnedNoEditor = false;
 
     /**
@@ -200,6 +203,10 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_start", (_event, ctx) => {
+        // A session switch can drop an in-flight capture overlay without
+        // resolving it; reset so the leader key is live again afterwards.
+        activeEditor = null;
+        capturing = false;
         reportConfigProblems(ctx);
     });
 
@@ -216,23 +223,29 @@ export default function (pi: ExtensionAPI) {
                 // Whatever editor pi has mounted — its own or a custom one
                 // from another extension — is still the focused component at
                 // this point, and it stays mounted behind this overlay. Gray
-                // it in place instead of swapping in a look-alike, so nothing
-                // about the editor changes when leader mode opens.
-                activeEditor = focusedEditor(tui);
-                const wantsDim = current.editorEffect === "grayedOut";
-                const dimmed = wantsDim && activeEditor !== null;
-                if (!dimmed) {
-                    // Nothing to gray — either not asked for, or no editor has
-                    // focus — so the status line carries the indicator.
-                    if (wantsDim && !warnedNoEditor) {
-                        warnedNoEditor = true;
-                        ctx.ui.notify(
-                            "Leader mode found no editor to gray — falling back to the LEADER indicator.",
-                            "warning",
-                        );
-                    }
-                    ctx.ui.setStatus("leader", "LEADER");
+                // it in place instead of swapping in a look-alike. Focus does
+                // move to the overlay while it is up, so a text cursor
+                // disappears for the duration; the editor's text, keys, and
+                // undo history are untouched.
+                const editor = focusedEditor(tui);
+                activeEditor = editor;
+                const indicator = leaderIndicator(
+                    current.editorEffect,
+                    editor !== null,
+                );
+                if (indicator.warnNoEditor && !warnedNoEditor) {
+                    warnedNoEditor = true;
+                    ctx.ui.notify(
+                        "Leader mode found no editor to gray — falling back to the LEADER indicator.",
+                        "warning",
+                    );
                 }
+                if (indicator.status) {
+                    ctx.ui.setStatus("leader", indicator.status);
+                }
+                // Hoisted: this is a per-frame call, and pi's editor renders
+                // lazily, so the closure is reused rather than rebuilt.
+                const mutedBorder = (s: string) => theme.fg("muted", s);
 
                 let buffer = "";
                 let leaderTimer: ReturnType<typeof setTimeout> | null = null;
@@ -260,16 +273,17 @@ export default function (pi: ExtensionAPI) {
 
                 return {
                     render(width: number): string[] {
-                        // renderEditor() owns the graying: no editor, no
-                        // lines, and nothing to gray.
-                        if (!activeEditor) return [""];
-                        return renderEditor(activeEditor, width, {
-                            dim: dimmed,
-                            borderColor: (s: string) => theme.fg("muted", s),
+                        // Frozen at open: the editor reference never changes
+                        // under this overlay, so a session switch cannot leave
+                        // a live read and a stale flag disagreeing.
+                        if (!editor) return [""];
+                        return renderEditor(editor, width, {
+                            dim: indicator.dim,
+                            borderColor: mutedBorder,
                         });
                     },
                     invalidate(): void {
-                        activeEditor?.invalidate?.();
+                        editor?.invalidate?.();
                     },
                     // The host drops overlays on a session switch without
                     // resolving them, so the timers have to die here too.
@@ -343,6 +357,11 @@ export default function (pi: ExtensionAPI) {
             // Restoring the marker after submitValue() wiped the paste map
             // would lose the pasted text for good.
             const draft = ctx.ui.getEditorText();
+            // ctx.ui writes through pi's own editor instance
+            // (setEditorText is `this.editor.setText`). That is the editor
+            // the capture overlay focused on in practice — the leader
+            // shortcut is routed from the editor's own handler — so the
+            // draft and the submission below land on the same instance.
             ctx.ui.setEditorText(submitted);
             await submitViaEditor(activeEditor);
             // Give the draft back unless the command left new text behind.

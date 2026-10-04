@@ -95,6 +95,48 @@ suite("focusedEditor() against pi's TUI", () => {
     });
 });
 
+suite("the capture sequence", () => {
+    test("grays the captured editor while an overlay owns focus", () => {
+        const { tui, editor } = buildEditor();
+        tui.setFocus(editor);
+
+        // What the overlay factory does: take the reference now, then take
+        // focus for itself.
+        const captured = focusedEditor(tui);
+        assert.ok(captured, "the editor is captured before focus moves");
+        tui.setFocus({
+            render: () => ["> leader"],
+            invalidate: () => {},
+        });
+
+        const lines = renderEditor(captured, 60, {
+            dim: true,
+            borderColor: (s: string) => `muted(${s})`,
+        });
+        assert.ok(
+            lines.some((line) => line.includes("hello world")),
+            "the overlay renders the editor's own text, grayed",
+        );
+        assert.ok(
+            !lines.some((line) => line.includes("> leader")),
+            "and nothing but the editor — the overlay draws no chrome",
+        );
+
+        // And what happens on release: focus goes back and the editor is
+        // exactly as it was, never unmounted or replaced.
+        tui.setFocus(editor);
+        const after = renderEditor(editor, 60, { dim: false });
+        assert.ok(
+            after.some((line) => line.includes("own(")),
+            "the editor's own border colour is back after leader mode",
+        );
+        assert.ok(
+            !after.some((line) => line.includes("muted(")),
+            "nothing of the overlay is left behind",
+        );
+    });
+});
+
 suite("renderEditor() against pi's editor", () => {
     test("dims off leaves the render untouched", () => {
         const { editor } = buildEditor();
