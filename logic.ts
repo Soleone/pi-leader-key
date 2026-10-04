@@ -438,8 +438,6 @@ export type MountedEditor = {
     onSubmit?(value: string): void | Promise<void>;
     /** Present on pi's editors; absent on a plain pi-tui Component. */
     borderColor?: (text: string) => string;
-    /** pi-tui keeps this private; present at runtime, used as a fast path. */
-    submitValue?(): void;
 };
 
 /**
