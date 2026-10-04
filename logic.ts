@@ -5,7 +5,13 @@
  * @earendil-works/pi-* don't resolve outside pi).
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    readFileSync,
+    renameSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -68,14 +74,25 @@ export const DEFAULT_CONFIG: LeaderConfig = {
  */
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "leader-key.json");
 
-/** Why the loader fell back to defaults. "missing" is normal (no config yet). */
-export type ConfigError = "missing" | "parse" | null;
+/**
+ * Why the loader fell back to defaults. "missing" is normal (no config
+ * yet), "parse" means the file is not JSON at all, "shape" means it is
+ * JSON but not a config object.
+ */
+export type ConfigError = "missing" | "parse" | "shape" | null;
 
 export interface ConfigResult {
     config: LeaderConfig;
     error: ConfigError;
-    /** Keys sanitized away — surfaced once per leader press, never silent. */
+    /**
+     * Keys sanitized away — reported once per session (never silent), each
+     * with its reason in `reasons`.
+     */
     dropped: string[];
+    /** Why each dropped key was dropped (a subset of `dropped`). */
+    reasons: Record<string, string>;
+    /** File-level problems that aren't tied to one binding key. */
+    notes: string[];
 }
 
 /** Guard for hand-edited config: only well-shaped bindings reach dispatch. */
@@ -98,27 +115,63 @@ export function isBindingAction(v: unknown): v is BindingAction {
     return false;
 }
 
+const BINDING_VARIANTS = ["command", "action", "exec"] as const;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Sanitize the raw `bindings` map. Entries are rebuilt with
+ * Object.fromEntries, which defines properties instead of assigning them,
+ * so a binding literally named `__proto__` becomes an own property rather
+ * than mutating the prototype (JSON.parse does the same).
+ */
 function sanitizeBindings(v: unknown): {
     bindings: Record<string, BindingAction>;
     dropped: string[];
+    reasons: Record<string, string>;
+    /** Set when `bindings` itself was unusable (so the whole map is empty). */
+    note?: string;
 } {
-    const empty = { bindings: {}, dropped: [] as string[] };
-    if (v == null || typeof v !== "object" || Array.isArray(v)) return empty;
-    const bindings: Record<string, BindingAction> = {};
+    const empty = { bindings: {}, dropped: [], reasons: {} } as {
+        bindings: Record<string, BindingAction>;
+        dropped: string[];
+        reasons: Record<string, string>;
+        note?: string;
+    };
+    if (v === undefined || v === null) return empty;
+    if (!isPlainObject(v))
+        return { ...empty, note: "bindings must be an object — ignoring it" };
+    const entries: Array<[string, BindingAction]> = [];
     const dropped: string[] = [];
-    for (const [k, entry] of Object.entries(v as Record<string, unknown>)) {
+    const reasons: Record<string, string> = {};
+    for (const [k, entry] of Object.entries(v)) {
+        const variants = isPlainObject(entry)
+            ? BINDING_VARIANTS.filter((name) => name in entry)
+            : [];
+        if (variants.length > 1) {
+            dropped.push(k);
+            reasons[k] = `has ${variants.length} binding types (${variants.join(", ")}) — keep exactly one`;
+            continue;
+        }
         const normalized = normalizeBinding(entry);
-        if (normalized) bindings[k] = normalized;
-        else dropped.push(k);
+        if (normalized) entries.push([k, normalized]);
+        else {
+            dropped.push(k);
+            reasons[k] = isPlainObject(entry)
+                ? "invalid binding value"
+                : "not an object";
+        }
     }
-    return { bindings, dropped };
+    return { bindings: Object.fromEntries(entries), dropped, reasons };
 }
 
 /**
  * Normalize one raw binding: legacy `{ command: "/cmd args" }` splits on
- * the first whitespace run (explicit `args` wins on the rare both-present
- * case); args edges are trimmed, interior kept verbatim. Returns null when
- * the entry is not a well-shaped binding.
+ * the first whitespace run (explicit `args` wins whenever the key is
+ * present, even if blank); args edges are trimmed, interior kept
+ * verbatim. Returns null when the entry is not a well-shaped binding.
  */
 function normalizeBinding(v: unknown): BindingAction | null {
     if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
@@ -133,36 +186,83 @@ function normalizeBinding(v: unknown): BindingAction | null {
         if (explicit !== undefined && typeof explicit !== "string") {
             return null;
         }
-        // Explicit args win over the embedded remainder when both exist.
-        const args = explicit?.trim() || embedded;
+        // Explicit args win over the embedded remainder whenever present,
+        // including when they are blank — `args: ""` means "no args".
+        const args = explicit !== undefined ? explicit.trim() : embedded;
         return args ? { command: head, args } : { command: head };
     }
     return isBindingAction(v) ? (v as BindingAction) : null;
 }
 
+const LEADER_MODIFIERS = new Set(["ctrl", "shift", "alt", "super"]);
+const LEADER_KEY_NAMES = new Set([
+    "escape", "esc", "space", "tab", "enter", "return", "backspace",
+    "insert", "delete", "clear", "home", "end",
+    "pageup", "pagedown", "up", "down", "left", "right",
+]);
+
+/**
+ * Validate a leader key binding the way pi-tui's parseKeyId reads it:
+ * modifier prefixes from a fixed set plus a final key name. pi ignores
+ * unknown modifiers and never matches an empty key, so a typo'd leaderKey
+ * registers a shortcut that silently never fires — catch it at load.
+ * Returns an error code ("empty" | "bad-modifier" | "bad-key") or null.
+ */
+export function validateLeaderKey(raw: unknown): string | null {
+    if (typeof raw !== "string") return "empty";
+    const parts = raw.trim().toLowerCase().split("+");
+    const key = parts[parts.length - 1] ?? "";
+    if (raw.trim().length === 0 || parts.length === 1) return "empty";
+    for (const mod of parts.slice(0, -1)) {
+        if (!LEADER_MODIFIERS.has(mod)) return "bad-modifier";
+    }
+    if (!key || (!LEADER_KEY_NAMES.has(key) && !/^[a-z0-9]$/.test(key)))
+        return "bad-key";
+    return null;
+}
+
+function positiveMs(raw: unknown, fallback: number): number {
+    return typeof raw === "number" && Number.isFinite(raw) && raw > 0
+        ? raw
+        : fallback;
+}
+
 export function loadConfig(path: string = CONFIG_PATH): ConfigResult {
     const defaults = { ...DEFAULT_CONFIG, bindings: {} };
+    const blank = { config: defaults, dropped: [], reasons: {}, notes: [] };
     try {
         if (!existsSync(path))
-            return { config: defaults, error: "missing", dropped: [] };
-        const parsed = JSON.parse(readFileSync(path, "utf-8"));
-        const { bindings, dropped } = sanitizeBindings(parsed.bindings);
+            return { ...blank, error: "missing" };
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+        if (!isPlainObject(parsed))
+            return {
+                ...blank,
+                error: "shape",
+                notes: ["top level is not a JSON object — using defaults"],
+            };
+        const { bindings, dropped, reasons, note } = sanitizeBindings(
+            parsed.bindings,
+        );
+        const notes = note ? [note] : [];
+        const leaderKeyError = validateLeaderKey(parsed.leaderKey);
+        if (parsed.leaderKey !== undefined && leaderKeyError !== null)
+            notes.push(
+                `leaderKey ${JSON.stringify(parsed.leaderKey)} is not a key pi can match — using ${DEFAULT_CONFIG.leaderKey}`,
+            );
         return {
             config: {
                 leaderKey:
-                    typeof parsed.leaderKey === "string"
-                        ? parsed.leaderKey
+                    leaderKeyError === null
+                        ? (parsed.leaderKey as string)
                         : DEFAULT_CONFIG.leaderKey,
-                leaderTimeoutMs:
-                    typeof parsed.leaderTimeoutMs === "number" &&
-                    parsed.leaderTimeoutMs > 0
-                        ? parsed.leaderTimeoutMs
-                        : DEFAULT_CONFIG.leaderTimeoutMs,
-                sequenceTimeoutMs:
-                    typeof parsed.sequenceTimeoutMs === "number" &&
-                    parsed.sequenceTimeoutMs > 0
-                        ? parsed.sequenceTimeoutMs
-                        : DEFAULT_CONFIG.sequenceTimeoutMs,
+                leaderTimeoutMs: positiveMs(
+                    parsed.leaderTimeoutMs,
+                    DEFAULT_CONFIG.leaderTimeoutMs,
+                ),
+                sequenceTimeoutMs: positiveMs(
+                    parsed.sequenceTimeoutMs,
+                    DEFAULT_CONFIG.sequenceTimeoutMs,
+                ),
                 // Configs from the spinner era may still carry editorEffect: "spinner";
                 // anything that isn't "none" falls back to the default (grayedOut).
                 editorEffect:
@@ -173,9 +273,11 @@ export function loadConfig(path: string = CONFIG_PATH): ConfigResult {
             },
             error: null,
             dropped,
+            reasons,
+            notes,
         };
     } catch {
-        return { config: defaults, error: "parse", dropped: [] };
+        return { ...blank, error: "parse" };
     }
 }
 
@@ -282,6 +384,56 @@ export function isProperPrefix(prefix: string, candidate: string): boolean {
     return candidate.startsWith(prefix) && candidate.length > prefix.length;
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch planning + exec output sanitizing
+// ---------------------------------------------------------------------------
+
+/**
+ * What a binding means, decided without touching pi. index.ts only
+ * executes the plan, so the routing rules stay testable.
+ */
+export type DispatchPlan =
+    | { kind: "command"; text: string }
+    | { kind: "action"; action: "compact" | "shutdown" | "clearEditor" }
+    | { kind: "exec"; cmd: string }
+    | { kind: "unknown" };
+
+export function dispatchPlan(binding: BindingAction): DispatchPlan {
+    if (!isBindingAction(binding)) return { kind: "unknown" };
+    if ("command" in binding)
+        return { kind: "command", text: composeCommand(binding) };
+    if ("action" in binding) return { kind: "action", action: binding.action };
+    return { kind: "exec", cmd: binding.exec };
+}
+
+/**
+ * CSI, OSC and two-byte escapes, so a shell command's output can't move the
+ * cursor, recolor the transcript, or rewrite the terminal title when it is
+ * echoed back into the session.
+ */
+const ANSI_RE = new RegExp(
+    [
+        "[\\u001B\\u009B]\\[[0-9;?]*[ -/]*[@-~]", // CSI ... final byte
+        "\\u001B\\][^\\u0007\\u001B]*(?:\\u0007|\\u001B\\\\)", // OSC ... BEL or ST
+        "\\u001B[@-Z\\\\-_]", // two-byte escapes
+        "\\u001B.", // any other escape
+    ].join("|"),
+    "g",
+);
+
+/** Strip terminal control sequences from command output. */
+export function stripAnsi(s: string): string {
+    return s.replace(ANSI_RE, "");
+}
+
+/** Strip control sequences, drop carriage returns, and cap the length. */
+export function capOutput(s: string, limit = 2000): string {
+    const clean = stripAnsi(s).replace(/\r/g, "").trim();
+    return clean.length > limit
+        ? `${clean.slice(0, limit)}\n… (${clean.length - limit} more characters)`
+        : clean;
+}
+
 /**
  * Sequence matching engine — pure function that determines the result
  * of a keypress given the current buffer and bindings.
@@ -373,32 +525,80 @@ export function mergeBinding(
 
 export type SaveResult = { ok: true } | { ok: false; error: string };
 
+function describe(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * Merge one binding into the config file on disk: read → merge → write.
  * A corrupt or unreadable existing file is never overwritten (a failed
  * write must not lose user config); the result object carries the error
  * so the caller decides how to surface it.
  */
+/**
+ * Merge one binding into the config file on disk: read → merge → write.
+ *
+ * The merge is done against the RAW parsed file, not the normalized
+ * config, so fields this version doesn't model (and bindings it can't
+ * parse) survive a save instead of being silently deleted. The write goes
+ * to a temp file and is renamed into place, so an interrupted write can't
+ * leave a truncated config. A corrupt or unreadable existing file is never
+ * overwritten; the result object carries the error so the caller decides
+ * how to surface it.
+ */
 export function saveBinding(
     seq: string,
     binding: BindingAction,
     path: string = CONFIG_PATH,
 ): SaveResult {
-    const loaded = loadConfig(path);
-    if (loaded.error === "parse") {
-        return {
-            ok: false,
-            error: "config file is not valid JSON — fix or remove it first",
-        };
+    let raw: Record<string, unknown> = {};
+    if (existsSync(path)) {
+        let text: string;
+        try {
+            text = readFileSync(path, "utf-8");
+        } catch (err) {
+            return {
+                ok: false,
+                error: `cannot read config file: ${describe(err)}`,
+            };
+        }
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            return {
+                ok: false,
+                error: "config file is not valid JSON — fix or remove it first",
+            };
+        }
+        if (!isPlainObject(parsed))
+            return {
+                ok: false,
+                error: "config file is not a JSON object — fix or remove it first",
+            };
+        raw = parsed;
     }
-    const merged = mergeBinding(loaded.config, seq, binding);
+    const existing = isPlainObject(raw.bindings) ? raw.bindings : {};
+    const next = {
+        ...raw,
+        // Object.fromEntries defines keys instead of assigning them, so a
+        // sequence named `__proto__` stays an ordinary binding.
+        bindings: Object.fromEntries([
+            ...Object.entries(existing),
+            [seq, binding],
+        ]),
+    };
+    const tmp = `${path}.${process.pid}.tmp`;
     try {
-        writeFileSync(path, JSON.stringify(merged, null, 2) + "\n");
+        writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n");
+        renameSync(tmp, path);
         return { ok: true };
     } catch (err) {
-        return {
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-        };
+        try {
+            rmSync(tmp, { force: true });
+        } catch {
+            // best effort — the original file is untouched either way
+        }
+        return { ok: false, error: describe(err) };
     }
 }

@@ -11,6 +11,7 @@
 import {
     existsSync,
     mkdirSync,
+    readdirSync,
     readFileSync,
     rmSync,
     unlinkSync,
@@ -31,7 +32,12 @@ import {
     isPrintableKey,
     loadConfig,
     processKey,
+    capOutput,
+    dispatchPlan,
+    stripAnsi,
+    validateLeaderKey,
     type BindingAction,
+    type CommandBinding,
     type LeaderConfig,
     findConflicts,
     mergeBinding,
@@ -140,7 +146,7 @@ assert(!isProperPrefix("", "a"), "empty string is not a prefix");
 section("processKey — unique exact match => fire immediately");
 
 {
-    const bindings = {
+    const bindings: Record<string, BindingAction> = {
         w: { command: "/model" },
         q: { action: "shutdown" },
         n: { exec: "true" },
@@ -214,7 +220,10 @@ section("processKey — partial match only (prefix, not exact) => wait");
 section("processKey — dead end => dismiss");
 
 {
-    const bindings = { w: { command: "/model" }, q: { action: "shutdown" } };
+    const bindings: Record<string, BindingAction> = {
+        w: { command: "/model" },
+        q: { action: "shutdown" },
+    };
     assertEq(
         processKey("x", bindings),
         { action: "dismiss" },
@@ -535,9 +544,10 @@ section("legacy embedded-args normalization");
         { command: "/model", args: "opus" },
         "split form preserved",
     );
+    // Both are command bindings; the cast just satisfies the narrower signature.
     assertEq(
-        composeCommand(r.config.bindings.legacy!),
-        composeCommand(r.config.bindings.split!),
+        composeCommand(r.config.bindings.legacy as CommandBinding),
+        composeCommand(r.config.bindings.split as CommandBinding),
         "both forms dispatch identically",
     );
 
@@ -631,7 +641,7 @@ section("Config loading");
     writeFileSync(
         CONFIG_PATH,
         JSON.stringify({
-            leaderKey: "ctrl+\\",
+            leaderKey: "ctrl+b",
             leaderTimeoutMs: 5000,
             sequenceTimeoutMs: 1000,
             bindings: { w: { command: "/model" } },
@@ -639,7 +649,7 @@ section("Config loading");
     );
     const r2 = loadConfig(CONFIG_PATH);
     assertEq(r2.error, null, "valid config has no error");
-    assertEq(r2.config.leaderKey, "ctrl+\\", "custom leaderKey");
+    assertEq(r2.config.leaderKey, "ctrl+b", "custom leaderKey");
     assertEq(r2.config.leaderTimeoutMs, 5000, "custom leaderTimeoutMs");
     assertEq(r2.config.sequenceTimeoutMs, 1000, "custom sequenceTimeoutMs");
     assert(
@@ -965,7 +975,7 @@ section("saveBinding");
     writeFileSync(
         SAVE_PATH,
         JSON.stringify({
-            leaderKey: "ctrl+\\",
+            leaderKey: "ctrl+b",
             bindings: { c: { action: "compact" }, gs: { exec: "git status" } },
         }),
     );
@@ -982,7 +992,7 @@ section("saveBinding");
         { exec: "git status" },
         "prior bindings intact",
     );
-    assertEq(reloaded.leaderKey, "ctrl+\\", "non-binding fields intact");
+    assertEq(reloaded.leaderKey, "ctrl+b", "non-binding fields intact");
 
     // Overwrite an existing sequence
     const r3 = saveBinding("gs", { command: "/branch" }, SAVE_PATH);
@@ -1063,6 +1073,432 @@ section("shouldRestoreDraft");
         !shouldRestoreDraft("opus-4.6", "/model opus"),
         "handler output wins over composed command draft",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Hostile config shapes
+// ---------------------------------------------------------------------------
+
+section("config: prototype-polluting binding key");
+
+{
+    const p = join(CONFIG_DIR, "proto.json");
+    writeFileSync(
+        p,
+        `{"bindings":{"__proto__":{"command":"/evil"},"g":{"exec":"true"}}}`,
+    );
+    const r = loadConfig(p);
+    assertEq(r.error, null, "load succeeds");
+    assertEq(
+        Object.keys(r.config.bindings),
+        ["__proto__", "g"],
+        "__proto__ is a real own key, not lost",
+    );
+    assertEq(
+        ({} as Record<string, unknown>).command,
+        undefined,
+        "Object.prototype is untouched",
+    );
+    assertEq(
+        Object.getPrototypeOf(r.config.bindings),
+        Object.prototype,
+        "bindings keeps a normal prototype",
+    );
+    assertEq(
+        processKey("__proto__", r.config.bindings),
+        { action: "fire", key: "__proto__" },
+        "the __proto__ sequence still dispatches",
+    );
+    assertEq(r.dropped, [], "nothing dropped");
+
+    // Round-trips through save without losing or mutating anything.
+    assertEq(
+        saveBinding("__proto__", { command: "/other" }, p).ok,
+        true,
+        "saving __proto__ succeeds",
+    );
+    assertEq(
+        ({} as Record<string, unknown>).command,
+        undefined,
+        "save did not pollute the prototype",
+    );
+    assertEq(
+        loadConfig(p).config.bindings["__proto__"],
+        { command: "/other" },
+        "saved __proto__ binding reads back",
+    );
+}
+
+section("config: malformed bindings");
+
+{
+    const p = join(CONFIG_DIR, "bad-bindings.json");
+    writeFileSync(
+        p,
+        JSON.stringify({
+            bindings: {
+                both: { command: "/model", exec: "rm -rf /" },
+                tri: { command: "/x", action: "compact", exec: "y" },
+                notobj: "nope",
+                arr: ["command"],
+                empty: {},
+                noexec: { exec: "   " },
+                unknownkey: { teleport: "now" },
+                good: { action: "compact" },
+            },
+        }),
+    );
+    const r = loadConfig(p);
+    assertEq(r.error, null, "file is valid JSON, no parse error");
+    assertEq(Object.keys(r.config.bindings), ["good"], "only the valid binding loads");
+    assertEq(
+        r.dropped.sort(),
+        ["arr", "both", "empty", "noexec", "notobj", "tri", "unknownkey"],
+        "every bad entry is reported, never silently dropped",
+    );
+    assert(
+        (r.reasons.both ?? "").includes("2 binding types"),
+        `multi-type reason is specific: ${r.reasons.both}`,
+    );
+    assertEq(r.reasons.notobj, "not an object", "non-object reason");
+    assertEq(r.reasons.empty, "invalid binding value", "empty-object reason");
+    assertEq(r.reasons.unknownkey, "invalid binding value", "unknown-field reason");
+}
+
+section("config: unusable shapes");
+
+{
+    const cases: Array<[string, string, string]> = [
+        ["null.json", "null", "shape"],
+        ["array.json", "[1,2]", "shape"],
+        ["string.json", '"hello"', "shape"],
+        ["number.json", "42", "shape"],
+        ["broken.json", "{oops", "parse"],
+    ];
+    for (const [name, body, expected] of cases) {
+        const p = join(CONFIG_DIR, name);
+        writeFileSync(p, body);
+        const r = loadConfig(p);
+        assertEq(r.error, expected, `${body} reports ${expected}`);
+        assertEq(r.config, { ...DEFAULT_CONFIG, bindings: {} }, `${body} falls back to defaults`);
+    }
+
+    // bindings present but not an object: no throw, explained in notes
+    const p = join(CONFIG_DIR, "string-bindings.json");
+    writeFileSync(p, JSON.stringify({ bindings: "nope" }));
+    const r = loadConfig(p);
+    assertEq(r.error, null, "string bindings is not a parse error");
+    assertEq(r.config.bindings, {}, "bindings ignored");
+    assert(
+        r.notes.some((n) => n.includes("bindings must be an object")),
+        `string bindings is explained: ${JSON.stringify(r.notes)}`,
+    );
+
+    // explicit null bindings must not throw either
+    const p2 = join(CONFIG_DIR, "null-bindings.json");
+    writeFileSync(p2, JSON.stringify({ bindings: null }));
+    assertEq(loadConfig(p2).error, null, "null bindings is not an error");
+}
+
+section("config: numeric validation");
+
+{
+    const p = join(CONFIG_DIR, "numbers.json");
+    writeFileSync(
+        p,
+        JSON.stringify({
+            leaderTimeoutMs: 1e308 * 10, // Infinity once parsed
+            sequenceTimeoutMs: Number.POSITIVE_INFINITY,
+            bindings: {},
+        }),
+    );
+    const r = loadConfig(p);
+    assertEq(
+        r.config.leaderTimeoutMs,
+        DEFAULT_CONFIG.leaderTimeoutMs,
+        "overflowing leaderTimeoutMs falls back (setTimeout would clamp to 1ms)",
+    );
+    assertEq(
+        r.config.sequenceTimeoutMs,
+        DEFAULT_CONFIG.sequenceTimeoutMs,
+        "Infinity sequenceTimeoutMs falls back",
+    );
+    for (const bad of [-1, 0, "1000", null, {}]) {
+        writeFileSync(p, JSON.stringify({ leaderTimeoutMs: bad, bindings: {} }));
+        assertEq(
+            loadConfig(p).config.leaderTimeoutMs,
+            DEFAULT_CONFIG.leaderTimeoutMs,
+            `leaderTimeoutMs ${JSON.stringify(bad)} falls back`,
+        );
+    }
+    for (const bad of [-1, 0, "750", null]) {
+        writeFileSync(p, JSON.stringify({ sequenceTimeoutMs: bad, bindings: {} }));
+        assertEq(
+            loadConfig(p).config.sequenceTimeoutMs,
+            DEFAULT_CONFIG.sequenceTimeoutMs,
+            `sequenceTimeoutMs ${JSON.stringify(bad)} falls back`,
+        );
+    }
+}
+
+section("validateLeaderKey");
+
+{
+    for (const ok of [
+        "ctrl+space",
+        "ctrl+b",
+        "alt+space",
+        "shift+enter",
+        "ctrl+shift+p",
+        "ctrl+alt+left",
+        "super+k",
+        "  ctrl+space  ",
+        "CTRL+SPACE",
+    ])
+        assertEq(validateLeaderKey(ok), null, `${ok} is valid`);
+    // pi never matches these (empty final key, or an unknown modifier it
+    // silently ignores) — the shortcut would never fire.
+    assertEq(validateLeaderKey("ctrl+\\"), "bad-key", "ctrl+\\ has no key");
+    assertEq(validateLeaderKey(""), "empty", "empty string");
+    assertEq(validateLeaderKey("   "), "empty", "whitespace only");
+    assertEq(validateLeaderKey(42), "empty", "non-string");
+    assertEq(validateLeaderKey("space"), "empty", "no modifier");
+    assertEq(validateLeaderKey("contorl+space"), "bad-modifier", "typo'd modifier");
+    assertEq(validateLeaderKey("ctrl+nosuchkey"), "bad-key", "unknown key name");
+    assertEq(validateLeaderKey("ctrl+enter+"), "bad-modifier", "trailing plus");
+
+    // loadConfig falls back and says why
+    const p = join(CONFIG_DIR, "leaderkey.json");
+    writeFileSync(p, JSON.stringify({ leaderKey: "ctrl+\\", bindings: {} }));
+    const r = loadConfig(p);
+    assertEq(r.config.leaderKey, DEFAULT_CONFIG.leaderKey, "unmatchable leaderKey falls back");
+    assert(
+        r.notes.some((n) => n.includes("leaderKey")),
+        `bad leaderKey is reported: ${JSON.stringify(r.notes)}`,
+    );
+    writeFileSync(p, JSON.stringify({ bindings: {} }));
+    assertEq(
+        loadConfig(p).notes.length,
+        0,
+        "an absent leaderKey is not a note",
+    );
+}
+
+section("command args precedence");
+
+{
+    // Explicit args win whenever the key is present, even blank.
+    writeFileSync(
+        CONFIG_PATH,
+        JSON.stringify({ bindings: { m: { command: "/model opus", args: "" } } }),
+    );
+    assertEq(
+        loadConfig(CONFIG_PATH).config.bindings.m,
+        { command: "/model" },
+        `args:"" drops the embedded remainder: ${JSON.stringify(loadConfig(CONFIG_PATH).config.bindings.m)}`,
+    );
+    writeFileSync(
+        CONFIG_PATH,
+        JSON.stringify({ bindings: { m: { command: "/model opus", args: "   " } } }),
+    );
+    assertEq(
+        loadConfig(CONFIG_PATH).config.bindings.m,
+        { command: "/model" },
+        "blank args drops the embedded remainder",
+    );
+    writeFileSync(
+        CONFIG_PATH,
+        JSON.stringify({ bindings: { m: { command: "/model opus", args: "sonnet" } } }),
+    );
+    assertEq(
+        loadConfig(CONFIG_PATH).config.bindings.m,
+        { command: "/model", args: "sonnet" },
+        "explicit args replace the embedded remainder",
+    );
+    // Non-string args are still rejected outright
+    writeFileSync(
+        CONFIG_PATH,
+        JSON.stringify({ bindings: { m: { command: "/model opus", args: 5 } } }),
+    );
+    assertEq(
+        loadConfig(CONFIG_PATH).dropped,
+        ["m"],
+        "non-string args drops the binding",
+    );
+}
+
+section("saveBinding is lossless");
+
+{
+    const p = join(CONFIG_DIR, "lossless.json");
+    writeFileSync(
+        p,
+        JSON.stringify(
+            {
+                leaderKey: "ctrl+b",
+                unknownTopLevel: { keep: 1 },
+                spinnerName: "dots",
+                bindings: {
+                    keep: { exec: "true" },
+                    handEdited: { teleport: "now" },
+                    blank: { exec: "   " },
+                    multi: { command: "/x", exec: "y" },
+                },
+            },
+            null,
+            2,
+        ),
+    );
+    assertEq(saveBinding("new", { action: "compact" }, p).ok, true, "save succeeds");
+    const raw = JSON.parse(readFileSync(p, "utf-8"));
+    assertEq(raw.unknownTopLevel, { keep: 1 }, "unknown top-level field survives");
+    assertEq(raw.spinnerName, "dots", "legacy spinner field survives");
+    assertEq(raw.bindings.keep, { exec: "true" }, "existing binding survives");
+    assertEq(
+        raw.bindings.handEdited,
+        { teleport: "now" },
+        "binding this version can't parse survives",
+    );
+    assertEq(raw.bindings.blank, { exec: "   " }, "invalid binding survives");
+    assertEq(
+        raw.bindings.multi,
+        { command: "/x", exec: "y" },
+        "ambiguous binding survives",
+    );
+    assertEq(raw.bindings.new, { action: "compact" }, "new binding written");
+    assertEq(
+        loadConfig(p).config.bindings.keep,
+        { exec: "true" },
+        "and still loads afterwards",
+    );
+    assertEq(
+        readdirSync(CONFIG_DIR).filter((f) => f.includes(".tmp")),
+        [],
+        "no temp file left behind",
+    );
+
+    // No existing file at all
+    const fresh = join(CONFIG_DIR, "fresh.json");
+    assertEq(saveBinding("g", { exec: "git status" }, fresh).ok, true, "save to missing file");
+    assertEq(
+        loadConfig(fresh).config.bindings.g,
+        { exec: "git status" },
+        "binding written to a new file",
+    );
+
+    // Top level that isn't an object: refuse, don't destroy
+    for (const [body, label] of [
+        ["[1,2]", "array"],
+        ["null", "null"],
+        ['"str"', "string"],
+    ] as const) {
+        const q = join(CONFIG_DIR, `shape-${label}.json`);
+        writeFileSync(q, body);
+        const r = saveBinding("g", { exec: "x" }, q);
+        assertEq(r.ok, false, `${label} top level refuses the save`);
+        assertEq(readFileSync(q, "utf-8"), body, `${label} file left byte-identical`);
+    }
+}
+
+section("dispatchPlan");
+
+{
+    assertEq(
+        dispatchPlan({ command: "/model" }),
+        { kind: "command", text: "/model" },
+        "command plan",
+    );
+    assertEq(
+        dispatchPlan({ command: "/model", args: "opus" }),
+        { kind: "command", text: "/model opus" },
+        "command plan composes args",
+    );
+    for (const action of ["compact", "shutdown", "clearEditor"] as const)
+        assertEq(
+            dispatchPlan({ action }),
+            { kind: "action", action },
+            `${action} plan`,
+        );
+    assertEq(
+        dispatchPlan({ exec: "git status" }),
+        { kind: "exec", cmd: "git status" },
+        "exec plan keeps the command verbatim",
+    );
+    // Unreachable through loadConfig, but the planner is total
+    assertEq(
+        dispatchPlan({ action: "bogus" } as unknown as BindingAction),
+        { kind: "unknown" },
+        "malformed binding plans as unknown",
+    );
+    assertEq(
+        dispatchPlan({ exec: "  " } as unknown as BindingAction),
+        { kind: "unknown" },
+        "blank exec plans as unknown",
+    );
+
+    // The command matrix, run through the real planner and the real
+    // draft-restore rule (replaces the old hand-mirrored matrix file).
+    // Rows are already-normalized bindings: dispatchPlan takes what
+    // loadConfig produced, so the legacy embedded form is not its input.
+    const matrix: Array<[BindingAction, string]> = [
+        [{ command: "/model", args: "opus" }, "/model opus"],
+        [{ command: "/om:view", args: "--all" }, "/om:view --all"],
+        [{ command: "/review:1" }, "/review:1"],
+        [{ command: "/reload", args: "a  b" }, "/reload a  b"],
+        [{ command: "/nope-not-real", args: "x" }, "/nope-not-real x"],
+        // args are opaque once normalized: edges were trimmed at load,
+        // interior spacing is passed through untouched
+        [{ command: "/spin-up", args: "a  b" }, "/spin-up a  b"],
+    ];
+    for (const [binding, expected] of matrix) {
+        assertEq(
+            dispatchPlan(binding),
+            { kind: "command", text: expected },
+            `matrix: ${JSON.stringify(binding)} → ${expected}`,
+        );
+    }
+    // An unnormalized value is rejected rather than silently mangled
+    assertEq(
+        dispatchPlan({ command: "/model  opus" }),
+        { kind: "unknown" },
+        "matrix: unnormalized legacy form is not dispatched raw",
+    );
+    // A built-in clears the editor, so the draft comes back; an idle
+    // handler leaves the command text, so it does not.
+    assertEq(
+        shouldRestoreDraft("", "/model opus"),
+        true,
+        "matrix: cleared editor restores the draft",
+    );
+    assertEq(
+        shouldRestoreDraft("/model opus", "/model opus"),
+        true,
+        "matrix: untouched command text restores the draft",
+    );
+    assertEq(
+        shouldRestoreDraft("handler output", "/model opus"),
+        false,
+        "matrix: handler output wins over the draft",
+    );
+}
+
+section("stripAnsi + capOutput");
+
+{
+    assertEq(stripAnsi("\u001B[31mred\u001B[0m"), "red", "CSI color stripped");
+    assertEq(stripAnsi("\u001B]0;title\u0007after"), "after", "OSC title stripped");
+    assertEq(
+        stripAnsi("git status\u001B[?25lhidden cursor"),
+        "git statushidden cursor",
+        "private CSI stripped",
+    );
+    assertEq(stripAnsi("plain output"), "plain output", "plain text untouched");
+    assertEq(capOutput("  a\u001B[0m\r\nb  "), "a\nb", "capOutput trims and drops CR");
+    const long = "x".repeat(5000);
+    const capped = capOutput(long, 100);
+    assert(capped.startsWith("x".repeat(100)), "cap keeps the head");
+    assert(capped.includes("4900 more characters"), `cap reports the tail size: ${capped.slice(-40)}`);
+    assertEq(capOutput(long, 100).length < 200, true, "cap is bounded");
 }
 
 rmSync(CONFIG_DIR, { recursive: true, force: true });
