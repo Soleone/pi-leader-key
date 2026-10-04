@@ -12,6 +12,7 @@ import {
     matchesKey,
     SelectList,
     Text,
+    type Component,
     type EditorTheme,
 } from "@earendil-works/pi-tui";
 import {
@@ -19,6 +20,7 @@ import {
     composeCommand,
     findConflicts,
     isPrintableKey,
+    isProperPrefix,
     loadConfig,
     saveBinding,
     validateSequence,
@@ -26,6 +28,21 @@ import {
     type CommandMenuEntry,
     type PiCommand,
 } from "./logic.ts";
+
+/** pi hands `ui.custom` a resolved theme; `getTheme` types it as optional. */
+type Theme = NonNullable<ReturnType<ExtensionContext["ui"]["getTheme"]>>;
+
+/**
+ * A custom component pi-tui can focus. `isFocusable()` is a structural
+ * check for a `focused` property, so an overlay that omits it never gets
+ * `focused = true` — and the Editor it hosts then renders no caret,
+ * because the editor only draws its cursor marker while focused.
+ */
+type FocusableOverlay = Component & {
+    dispose?(): void;
+    focused?: boolean;
+    setFocused?(focused: boolean): void;
+};
 
 // ---------------------------------------------------------------------------
 // Shared picker helpers
@@ -37,7 +54,7 @@ import {
 
 /** SelectList theme shared by every picker in the extension. */
 function selectListTheme(
-    theme: ReturnType<ExtensionContext["ui"]["getTheme"]>,
+    theme: Theme,
 ) {
     return {
         selectedPrefix: (t: string) => theme.fg("accent", t),
@@ -55,7 +72,7 @@ interface SelectItem {
 }
 
 function makeSelectList(
-    theme: ReturnType<ExtensionContext["ui"]["getTheme"]>,
+    theme: Theme,
     items: SelectItem[],
     onSelect: (value: string) => void,
     onCancel: () => void,
@@ -72,7 +89,7 @@ function makeSelectList(
 
 function makeEditor(
     tui: TUI,
-    theme: ReturnType<ExtensionContext["ui"]["getTheme"]>,
+    theme: Theme,
 ): Editor {
     const editorTheme: EditorTheme = {
         borderColor: (s) => theme.fg("accent", s),
@@ -88,7 +105,7 @@ function makeEditor(
  * the query starts with "/"). Query state lives in the caller.
  */
 export function makeCommandPicker(
-    theme: ReturnType<ExtensionContext["ui"]["getTheme"]>,
+    theme: Theme,
     menu: CommandMenuEntry[],
     opts: {
         getQuery: () => string;
@@ -117,7 +134,7 @@ export function makeCommandPicker(
     rebuild();
 
     return {
-        render: (w) => container.render(w),
+        render: (w: number) => container.render(w),
         invalidate: () => container.invalidate(),
         handleInput: (data: string) => {
             if (matchesKey(data, "escape")) {
@@ -179,6 +196,9 @@ export async function runBindingWizard(
                 execValue = value.trim();
                 if (!execValue) {
                     status = "enter a shell command";
+                    // submitValue() cleared the editor before calling us;
+                    // put the user's own text back so they can fix it.
+                    editor.setText(value);
                     refresh();
                     return;
                 }
@@ -190,6 +210,7 @@ export async function runBindingWizard(
                     else if (err === "whitespace")
                         status = "no spaces in a sequence";
                     else status = "printable ASCII keys only";
+                    editor.setText(value);
                     refresh();
                     return;
                 }
@@ -202,6 +223,10 @@ export async function runBindingWizard(
         };
 
         const currentBindings = () => loadConfig().config.bindings;
+
+        /** True on the steps whose input goes to the text editor. */
+        const isEditorStep = (): boolean =>
+            step === "exec" || step === "sequence" || step === "args";
 
         const back = () => {
             status = "";
@@ -284,11 +309,30 @@ export async function runBindingWizard(
                 "",
             ];
             for (const key of findConflicts(bindings, sequence)) {
-                lines.push(`    ${key} → ${describeBinding(bindings[key]!)}`);
+                const existing = bindings[key];
+                if (!existing) continue;
+                lines.push(
+                    `    ${key} → ${describeBinding(existing)}`,
+                    theme.fg("dim", `      ${conflictRelation(key)}`),
+                );
             }
             lines.push("");
             return lines;
         };
+
+        /**
+         * How an existing key relates to the new one. Only an exact match
+         * is actually replaced by saving; prefix relations only cost a
+         * sequence timeout, so the wording has to say which is which.
+         */
+        const conflictRelation = (key: string): string => {
+            if (key === sequence) return "same sequence — saving replaces it";
+            if (isProperPrefix(sequence, key))
+                return `longer sequence — pressing ${sequence} now waits ${currentConfig().sequenceTimeoutMs}ms before firing`;
+            return `shorter sequence — it fires first if you stop after ${key}`;
+        };
+
+        const currentConfig = () => loadConfig().config;
 
         // ---- Command picker state (command step) ----
         let query = "";
@@ -399,8 +443,8 @@ export async function runBindingWizard(
                     [
                         {
                             value: "overwrite",
-                            label: "overwrite",
-                            description: "replace the existing binding(s)",
+                            label: "overwrite this sequence",
+                            description: `replace the binding for ${sequence}; related sequences are kept`,
                         },
                         {
                             value: "back",
@@ -498,14 +542,30 @@ export async function runBindingWizard(
             if (list) container.addChild(list);
             container.addChild(new Text(theme.fg("dim", `  ${hint}`), 1, 0));
             container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+            // The TUI only sets focus once, when the overlay mounts, so
+            // keep the editor's focus in step with the current step.
+            editor.focused = isEditorStep();
             tui.requestRender();
         }
 
         refresh();
 
-        return {
-            render: (w) => container.render(w),
+        const overlay: FocusableOverlay = {
+            render: (w: number) => container.render(w),
             invalidate: () => container.invalidate(),
+            // pi-tui only marks a component focused if it structurally has
+            // a `focused` property; the Editor draws its caret (and emits
+            // the terminal cursor marker) only while focused, so forward
+            // the overlay's focus to whichever child is currently live.
+            get focused() {
+                return isEditorStep() ? editor.focused : false;
+            },
+            set focused(value: boolean) {
+                if (isEditorStep()) editor.focused = value;
+            },
+            setFocused(focused: boolean) {
+                if (isEditorStep()) editor.focused = focused;
+            },
             handleInput: (data) => {
                 if (matchesKey(data, "escape")) {
                     if (step === "type") done(false);
@@ -543,5 +603,6 @@ export async function runBindingWizard(
                 tui.requestRender();
             },
         };
+        return overlay;
     });
 }
