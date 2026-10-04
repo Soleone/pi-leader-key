@@ -1753,8 +1753,6 @@ section("stripAnsi + capOutput (exec output)");
 
 rmSync(CONFIG_DIR, { recursive: true, force: true });
 
-section("stripAnsi + capOutput");
-
 console.log(`\n${"─".repeat(40)}`);
 console.log(`Passed: ${passed}  Failed: ${failed}`);
 if (failed > 0) {
