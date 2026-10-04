@@ -553,8 +553,7 @@ export async function runBindingWizard(
                     onCancel: back,
                 });
                 container.addChild(picker);
-                hint =
-                    "tab fill highlighted • enter take typed command • esc back";
+                hint = "tab or enter take command • esc back";
             }
 
             if (list) container.addChild(list);
@@ -591,15 +590,18 @@ export async function runBindingWizard(
                     return;
                 }
                 if (step === "command") {
-                    if (matchesKey(data, Key.enter)) {
-                        // A full "/name [args]" line is taken verbatim —
-                        // this is the path that completes a filter down to
-                        // one match without touching the picker. Anything
-                        // else ("/", "mod", a query matching nothing) takes
-                        // the highlighted entry: re-reading a name-only
-                        // query as a command used to report "command must
-                        // start with /" for text the picker had just
-                        // narrowed to a single match.
+                    if (
+                        matchesKey(data, Key.enter) ||
+                        matchesKey(data, Key.tab)
+                    ) {
+                        // One accept path for both keys, so neither can
+                        // do something the other does not: a full
+                        // "/name [args]" line is taken verbatim, anything
+                        // else ("/", "mod", a filter matching nothing)
+                        // takes the highlighted entry. Re-reading a
+                        // name-only query as a command used to report
+                        // "command must start with /" for text the picker
+                        // had just narrowed to a single match.
                         const line = splitCommandLine(query);
                         const command =
                             line?.command ?? picker?.selectedValue() ?? null;

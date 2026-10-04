@@ -82,7 +82,7 @@ In non-TUI mode the list is shown as a plain notification instead. Escape cancel
 Walks you through a binding in one overlay: pick a type (`command` / `action` / `exec`), enter the value (fuzzy command picker, action list, or free-text shell input), choose a key sequence, confirm, done.
 
 - Sequences must be printable ASCII with no spaces; command values must start with `/`
-- In the command step, **Tab** takes the highlighted match, **Enter** takes what you typed (`/name args` splits into command and args). A name-only filter like `mod` resolves to the highlighted `/model` instead of raising a validation error
+- In the command step, **Tab** or **Enter** takes the highlighted match (they are one accept path, not two), and a typed `/name args` line is taken verbatim with the args split off. A name-only filter like `mod` resolves to the highlighted `/model` instead of raising a validation error. The wizard never runs the command it picks
 - Collisions — exact or prefix overlaps — are shown with the conflicting bindings and require explicit overwrite confirmation
 - The merged config is written to `~/.pi/agent/leader-key.json` and works immediately, no reload
 - Escape walks back a step; cancelling anywhere writes nothing; a corrupt config file is never overwritten
