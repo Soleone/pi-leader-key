@@ -4,8 +4,8 @@
  * Reads bindings from ~/.pi/agent/leader-key.json and activates them when
  * you press the configured leader key. An invisible overlay captures
  * keystrokes and matches them against configured bindings. Command bindings
- * are routed through the editor's onSubmit pipeline for full slash-command
- * processing.
+ * are submitted through the editor's own submit path (its normal
+ * submit pipeline) for full slash-command processing.
  *
  * Pure logic (config loading, key matching, command-menu building) lives in
  * logic.ts, which the test suite imports directly.
@@ -50,7 +50,7 @@
  *
  * ## Binding types
  *
- *   command — Routes through the editor's onSubmit pipeline for full
+ *   command — Submitted through the editor's submit path for full
  *     slash-command processing. Works for extension commands and
  *     built-in commands alike. Arguments go in the explicit `args`
  *     field and are composed as `command + " " + args`.
@@ -79,8 +79,9 @@ import {
 } from "@earendil-works/pi-tui";
 import {
     buildCommandMenu,
-    composeCommand,
+    capOutput,
     CONFIG_PATH,
+    dispatchPlan,
     ensureConfig,
     isPrintableKey,
     loadConfig,
@@ -122,6 +123,65 @@ export default function (pi: ExtensionAPI) {
     let activeTui: TUI | undefined;
     let leaderEditor: CustomEditor | null = null;
     let activeEffect: EditorEffect | null = null;
+    /** True while a leader press is in flight — pi fires shortcuts without awaiting. */
+    let capturing = false;
+
+    /**
+     * Surface config problems once per session rather than on every press:
+     * an unusable `leaderKey` or an unparseable binding is a standing
+     * problem, not a per-keystroke event.
+     */
+    function reportConfigProblems(ctx: ExtensionContext): void {
+        const { error, dropped, reasons, notes } = loadConfig();
+        if (error === "parse") {
+            ctx.ui.notify(
+                `Failed to parse ${CONFIG_PATH} — using defaults.`,
+                "error",
+            );
+            return;
+        }
+        for (const note of notes) ctx.ui.notify(note, "warning");
+        if (dropped.length > 0)
+            ctx.ui.notify(
+                `Ignored ${dropped.length} invalid binding(s): ${dropped
+                    .map((k) => `"${k}" (${reasons[k] ?? "invalid"})`)
+                    .join(", ")} — check leader-key.json.`,
+                "warning",
+            );
+    }
+
+    /**
+     * Submit a command binding through the editor's own submit path.
+     *
+     * pi-tui keeps submitValue() private, but the Enter handler calls it
+     * and it is what a typed command needs: it cancels autocomplete, exits
+     * history browsing, and — unlike setText — leaves no undo entry
+     * holding the synthetic command text. Going through handleInput("\r")
+     * instead would depend on the user not having remapped
+     * `tui.input.submit`. onSubmit is wrapped for the duration of the call
+     * so the real handler's return value stays awaitable; if a future pi
+     * drops submitValue, fall back to calling onSubmit directly.
+     */
+    function submitViaEditor(editor: CustomEditor | null): Promise<unknown> {
+        if (!editor) return Promise.resolve(undefined);
+        let pending: unknown;
+        const original = editor.onSubmit;
+        editor.onSubmit = (value) => {
+            pending = original?.(value);
+        };
+        try {
+            // SAFETY: pi-tui marks submitValue private in its .d.ts but the
+            // method exists at runtime (the Enter handler calls it), and
+            // the typeof guard below falls back if a future pi drops it.
+            const submit = (editor as unknown as { submitValue?: () => void })
+                .submitValue;
+            if (typeof submit === "function") submit.call(editor);
+            else original?.(editor.getText());
+        } finally {
+            editor.onSubmit = original;
+        }
+        return Promise.resolve(pending);
+    }
 
     // ------------------------------------------------------------------
     // Session lifecycle
@@ -134,6 +194,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_start", (_event, ctx) => {
+        reportConfigProblems(ctx);
         if (ctx.mode !== "tui") return;
 
         ctx.ui.setEditorComponent((tui, theme, keybindings) => {
@@ -197,6 +258,12 @@ export default function (pi: ExtensionAPI) {
                     invalidate(): void {
                         leaderEditor?.invalidate();
                     },
+                    // The host drops overlays on a session switch without
+                    // resolving them, so the timers have to die here too.
+                    dispose(): void {
+                        buffer = "";
+                        cleanup();
+                    },
 
                     handleInput(data: string): void {
                         if (matchesKey(data, "escape")) {
@@ -243,11 +310,17 @@ export default function (pi: ExtensionAPI) {
         const binding = current.bindings[key];
         if (!binding) return;
 
-        if ("command" in binding) {
-            const submitted = composeCommand(binding);
-            const draft = leaderEditor?.getText() ?? "";
+        const plan = dispatchPlan(binding);
+        if (plan.kind === "command") {
+            const submitted = plan.text;
+            // Snapshot through the UI accessor, not leaderEditor.getText():
+            // a large paste is stored collapsed as a marker, getText()
+            // returns that marker, and getEditorText() expands it.
+            // Restoring the marker after submitValue() wiped the paste map
+            // would lose the pasted text for good.
+            const draft = ctx.ui.getEditorText();
             leaderEditor?.setText(submitted);
-            await leaderEditor?.onSubmit?.(submitted);
+            await submitViaEditor(leaderEditor);
             // Give the draft back unless the command left new text behind.
             if (shouldRestoreDraft(ctx.ui.getEditorText(), submitted)) {
                 ctx.ui.setEditorText(draft);
@@ -255,8 +328,8 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
-        if ("action" in binding) {
-            switch (binding.action) {
+        if (plan.kind === "action") {
+            switch (plan.action) {
                 case "compact":
                     ctx.compact({
                         onComplete: () =>
@@ -281,18 +354,25 @@ export default function (pi: ExtensionAPI) {
                     );
                     break;
             }
-        } else if ("exec" in binding) {
-            const r = await pi.exec("bash", ["-c", binding.exec], {
+        } else if (plan.kind === "exec") {
+            const r = await pi.exec("bash", ["-c", plan.cmd], {
                 timeout: 15000,
             });
-            // Cap what reaches the TUI — `cat huge.log` shouldn't flood it.
-            const cap = (s: string) =>
-                s.length > 2000 ? `${s.slice(0, 2000)}\n…[truncated]` : s;
+            // Cap what reaches the TUI — `cat huge.log` shouldn't flood it
+            // — and strip control sequences so a command can't move the
+            // cursor or rewrite the terminal title through its output.
+            const failed = r.code !== 0;
+            const body = capOutput(failed && r.stderr ? r.stderr : r.stdout);
             ctx.ui.notify(
-                r.code !== 0 && r.stderr
-                    ? `[exit ${r.code}] ${cap(r.stderr.trim())}`
-                    : cap(r.stdout.trim()) || `[exit ${r.code}]`,
+                failed
+                    ? `[exit ${r.code}] ${body || "no output"}`
+                    : body || `[exit ${r.code}]`,
                 "info",
+            );
+        } else {
+            ctx.ui.notify(
+                `Binding "${key}" isn't a command, action, or shell command — check leader-key.json.`,
+                "warning",
             );
         }
     }
@@ -325,6 +405,19 @@ export default function (pi: ExtensionAPI) {
                 return;
             }
 
+            if (ctx.mode !== "tui") {
+                ctx.ui.notify(
+                    buildCommandMenu(commands)
+                        .map(
+                            (e) =>
+                                `${e.label}${e.description ? ` — ${e.description}` : ""}`,
+                        )
+                        .join("\n"),
+                    "info",
+                );
+                return;
+            }
+
             const menu: Array<{
                 value: string;
                 label: string;
@@ -337,19 +430,6 @@ export default function (pi: ExtensionAPI) {
                 },
                 ...buildCommandMenu(commands),
             ];
-
-            if (ctx.mode !== "tui") {
-                ctx.ui.notify(
-                    menu
-                        .map(
-                            (e) =>
-                                `${e.label}${e.description ? ` — ${e.description}` : ""}`,
-                        )
-                        .join("\n"),
-                    "info",
-                );
-                return;
-            }
 
             // pi's built-in extension selector renders every option with no
             // scrolling, so long lists push the cursor off screen — use the
@@ -424,47 +504,45 @@ export default function (pi: ExtensionAPI) {
         description: "Leader key",
         handler: async (ctx) => {
             if (ctx.mode !== "tui") return;
+            // pi fires shortcuts without awaiting the handler and swaps the
+            // editor in a microtask, so two leader presses in one stdin
+            // chunk would otherwise start two overlapping overlays.
+            if (capturing) return;
 
-            const { config: current, error, dropped } = loadConfig();
-            if (error === "parse") {
-                ctx.ui.notify(
-                    `Failed to parse ${CONFIG_PATH} — using defaults.`,
-                    "error",
-                );
+            capturing = true;
+            try {
+                const { config: current } = loadConfig();
+                if (Object.keys(current.bindings).length === 0) {
+                    ctx.ui.notify("No leader bindings configured.", "warning");
+                    return;
+                }
+
+                const dimmed = current.editorEffect === "grayedOut";
+
+                // ---- Activate visual indicator ----
+                if (dimmed) {
+                    activeEffect = "grayedOut";
+                    activeTui?.requestRender();
+                } else {
+                    ctx.ui.setStatus("leader", "LEADER");
+                }
+
+                try {
+                    const result = await runEffectCapture(ctx, current);
+                    if (typeof result === "string")
+                        await dispatchBinding(ctx, current, result);
+                } finally {
+                    // Always clear the indicator: a throw in the overlay or
+                    // the dispatch must not leave the editor dimmed.
+                    if (dimmed) {
+                        activeEffect = null;
+                        activeTui?.requestRender();
+                    }
+                    ctx.ui.setStatus("leader", undefined);
+                }
+            } finally {
+                capturing = false;
             }
-            if (dropped.length > 0) {
-                ctx.ui.notify(
-                    `Ignored invalid bindings: ${dropped.map((k) => `"${k}"`).join(", ")} — check leader-key.json.`,
-                    "warning",
-                );
-            }
-            if (Object.keys(current.bindings).length === 0) {
-                ctx.ui.notify("No leader bindings configured.", "warning");
-                return;
-            }
-
-            const effect = current.editorEffect;
-
-            // ---- Activate visual indicator ----
-            if (effect === "none") {
-                ctx.ui.setStatus("leader", "LEADER");
-            } else {
-                activeEffect = "grayedOut";
-                activeTui?.requestRender();
-            }
-
-            // ---- Capture overlay ----
-            const result = await runEffectCapture(ctx, current);
-
-            // ---- Clean up visual indicator ----
-            if (effect !== "none") {
-                activeEffect = null;
-                activeTui?.requestRender();
-            }
-            ctx.ui.setStatus("leader", undefined);
-
-            if (typeof result !== "string") return;
-            await dispatchBinding(ctx, current, result);
         },
     });
 }
