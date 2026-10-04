@@ -62,7 +62,7 @@ slash commands from the environment at runtime rather than trusting any cached
 list:
 
 1. `/leader-commands` — picker over `pi.getCommands()` (extension commands, prompt templates, skills), generated at invocation time; type-to-filter fuzzy-matches names and descriptions; selecting one echoes the exact invokable string to paste into `bindings`
-2. `pi package list` — installed packages
+2. `pi list` — installed packages
 3. `grep registerCommand` in extension source files — registered commands
 4. Skill `SKILL.md` files — their registered slash commands
 5. Ask the user which commands they want mapped
