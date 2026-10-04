@@ -12,7 +12,8 @@
     ],
     "type": "module",
     "scripts": {
-        "test": "tsx --test __tests__/logic.test.ts"
+        "typecheck": "tsc --noEmit",
+        "test": "npm run typecheck && tsx --test __tests__/*.test.ts"
     },
     "files": [
         "index.ts",
@@ -31,6 +32,8 @@
         "@earendil-works/pi-tui": "*"
     },
     "devDependencies": {
-        "tsx": "^4.23.13"
+        "@types/node": "^26.6.4",
+        "tsx": "^4.23.13",
+        "typescript": "^5.9.3"
     }
 }
