@@ -30,8 +30,6 @@ jobs:
       - run: npm install -g npm@latest
       # setup-node exports github.token and writes an empty _authToken into
       # .npmrc; either would steer npm away from OIDC auth
-      # setup-node exports github.token and writes an empty _authToken into
-      # .npmrc; either would steer npm away from OIDC auth
       - run: |
           unset NODE_AUTH_TOKEN
           npm config delete //registry.npmjs.org/:_authToken 2>/dev/null || true
