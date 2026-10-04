@@ -71,7 +71,7 @@ Opens a scrollable picker over every invokable command in the current session �
 
 - **Type to filter** — fuzzy match over names and descriptions
 - Entries show provenance (`extension`, `prompt`, or `skill`) plus the description
-- **Tab** fills the highlighted command into the editor (the same gesture pi's own command autocomplete uses), **Enter** inserts it straight away — the editor is where you were about to type it anyway, so no copying
+- **Tab** fills the highlighted command into the query line so you can read the full name, **Enter** accepts the line — the same two-key contract the `/leader-bind` wizard uses, and the same gesture pi's own command autocomplete uses. The editor is where you were about to type it anyway, so no copying
 - If the editor already holds unrelated text, the pick falls back to echoing the exact invokable string (e.g. `/om:view`) for `bindings` — no typos
 - **+ Add binding**, the first entry, jumps straight into the `/leader-bind` wizard
 
@@ -82,7 +82,7 @@ In non-TUI mode the list is shown as a plain notification instead. Escape cancel
 Walks you through a binding in one overlay: pick a type (`command` / `action` / `exec`), enter the value (fuzzy command picker, action list, or free-text shell input), choose a key sequence, confirm, done.
 
 - Sequences must be printable ASCII with no spaces; command values must start with `/`
-- In the command step, **Tab** or **Enter** takes the highlighted match (they are one accept path, not two), and a typed `/name args` line is taken verbatim with the args split off. A name-only filter like `mod` resolves to the highlighted `/model` instead of raising a validation error. The wizard never runs the command it picks
+- In the command step, **Tab** fills the highlighted match into the query line and **Enter** commits that line to the args step — tab never advances, so the full command is on screen for one last look. A typed `/name args` line is taken verbatim, a name-only filter like `mod` resolves to the highlighted `/model` instead of raising a validation error. The wizard never runs the command it picks
 - Collisions — exact or prefix overlaps — are shown with the conflicting bindings and require explicit overwrite confirmation
 - The merged config is written to `~/.pi/agent/leader-key.json` and works immediately, no reload
 - Escape walks back a step; cancelling anywhere writes nothing; a corrupt config file is never overwritten

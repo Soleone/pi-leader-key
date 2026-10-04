@@ -71,13 +71,19 @@ function buildPicker() {
     };
 }
 
-suite("command picker: tab fills the highlighted command", () => {
+suite("command picker: tab fills, enter accepts", () => {
     suite("with an empty query", () => {
-        suite("tab", () => {
+        suite("tab fills the first entry into the query line", () => {
             const state = buildPicker();
             state.picker.handleInput("\t");
+            assert.equal(state.query, `/${MENU[0].value}`);
+            assert.deepEqual(state.picked, [], "nothing is accepted by tab");
+        });
+
+        suite("enter accepts the highlighted entry", () => {
+            const state = buildPicker();
+            state.picker.handleInput("\r");
             assert.deepEqual(state.picked, [MENU[0].value]);
-            assert.equal(state.query, "", "the query line is untouched");
         });
 
         suite("escape cancels", () => {
@@ -89,7 +95,7 @@ suite("command picker: tab fills the highlighted command", () => {
     });
 
     suite("after filtering to one match", () => {
-        suite("tab takes the fuzzy-filtered match, not the first entry", () => {
+        suite("tab fills the fuzzy-filtered match, not the first entry", () => {
             const state = buildPicker();
             // "/compact" typed as a bare name: the filter narrows the
             // list to one row, and tab must hand over that row.
@@ -97,7 +103,21 @@ suite("command picker: tab fills the highlighted command", () => {
             state.picker.handleInput("o");
             assert.equal(state.picker.selectedValue(), "compact");
             state.picker.handleInput("\t");
+            assert.equal(state.query, "/compact");
+            assert.deepEqual(state.picked, []);
+        });
+
+        suite("tab then enter accepts the filled command", () => {
+            const state = buildPicker();
+            // One keystroke at a time: the picker ignores multi-character
+            // input the way an editor ignores a pasted chunk it was not
+            // asked to take.
+            state.picker.handleInput("c");
+            state.picker.handleInput("o");
+            state.picker.handleInput("\t");
+            state.picker.handleInput("\r");
             assert.deepEqual(state.picked, ["compact"]);
+            assert.equal(state.query, "/compact", "the filled line stays");
         });
 
         suite("selectedValue tracks the query", () => {

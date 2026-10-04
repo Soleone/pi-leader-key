@@ -101,10 +101,12 @@ function makeEditor(
 
 /**
  * Fuzzy-filtered command picker: query line + SelectList over `menu`.
- * Shared by /leader-commands (enter or tab on a selection = pick) and
- * the wizard's command step (tab completes the highlighted entry into
- * the query line, the caller then confirms). Query state lives in the
- * caller.
+ * Shared by /leader-commands and the wizard's command step, with the
+ * same two-key contract in both: tab fills the highlighted entry into
+ * the query line so the user can read the full command, enter accepts
+ * what the query line says. Query state lives in the caller.
+ *
+ * SelectList only knows enter, so the tab branch is written out here.
  */
 export function makeCommandPicker(
     theme: Theme,
@@ -112,7 +114,10 @@ export function makeCommandPicker(
     opts: {
         getQuery: () => string;
         setQuery: (q: string) => void;
+        /** Enter on a highlighted entry. */
         onPick: (value: string) => void;
+        /** Tab on a highlighted entry. Defaults to filling the query. */
+        onComplete?: (value: string) => void;
         onCancel: () => void;
     },
 ) {
@@ -150,12 +155,18 @@ export function makeCommandPicker(
                 opts.onCancel();
                 return;
             }
-            // Tab completes the highlighted entry into the query line,
-            // the way pi's own command autocomplete does. SelectList
-            // only knows enter, so tab would otherwise do nothing.
+            // Tab fills the highlighted entry into the query line, the
+            // way pi's own command autocomplete does. SelectList only
+            // knows enter, so tab would otherwise do nothing. Nothing is
+            // accepted here: the caller decides what the filled line
+            // means.
             if (matchesKey(data, Key.tab)) {
                 const item = list.getSelectedItem();
-                if (item) opts.onPick(item.value);
+                if (item) {
+                    if (opts.onComplete) opts.onComplete(item.value);
+                    else opts.setQuery(`/${item.value}`);
+                    rebuild();
+                }
                 return;
             }
             if (data === "\x7f") {
@@ -275,6 +286,26 @@ export async function runBindingWizard(
             status = "";
             editor.setText("");
             refresh();
+        };
+
+        /**
+         * Enter in the command step: take the query line as the choice
+         * and move to args. A full "/name [args]" line is taken
+         * verbatim; a bare filter ("/", "mod") resolves to the picker's
+         * highlighted match via selectedValue(). Re-reading a name-only
+         * query as a command used to report "command must start with /"
+         * for text the picker had just narrowed to a single match.
+         */
+        const acceptCommand = () => {
+            const line = splitCommandLine(query);
+            const command = line?.command ?? picker?.selectedValue() ?? null;
+            if (command === null) {
+                status = "no command matches the filter";
+                refresh();
+                return;
+            }
+            commandValue = command;
+            goArgs(line?.args ?? "");
         };
 
         let chosenAction: "compact" | "shutdown" | "clearEditor" = "compact";
@@ -546,14 +577,15 @@ export async function runBindingWizard(
                     setQuery: (q) => {
                         query = q;
                     },
-                    onPick: (value) => {
-                        commandValue = `/${value}`;
-                        goArgs("");
-                    },
+                    // Tab fills the highlighted command into the query
+                    // line and leaves the user there: it is the last
+                    // look at the full command before enter commits it to
+                    // the args step.
+                    onPick: () => acceptCommand(),
                     onCancel: back,
                 });
                 container.addChild(picker);
-                hint = "tab or enter take command • esc back";
+                hint = "tab fill highlighted • enter choose • esc back";
             }
 
             if (list) container.addChild(list);
@@ -590,28 +622,8 @@ export async function runBindingWizard(
                     return;
                 }
                 if (step === "command") {
-                    if (
-                        matchesKey(data, Key.enter) ||
-                        matchesKey(data, Key.tab)
-                    ) {
-                        // One accept path for both keys, so neither can
-                        // do something the other does not: a full
-                        // "/name [args]" line is taken verbatim, anything
-                        // else ("/", "mod", a filter matching nothing)
-                        // takes the highlighted entry. Re-reading a
-                        // name-only query as a command used to report
-                        // "command must start with /" for text the picker
-                        // had just narrowed to a single match.
-                        const line = splitCommandLine(query);
-                        const command =
-                            line?.command ?? picker?.selectedValue() ?? null;
-                        if (command === null) {
-                            status = "no command matches the filter";
-                            refresh();
-                            return;
-                        }
-                        commandValue = command;
-                        goArgs(line?.args ?? "");
+                    if (matchesKey(data, Key.enter)) {
+                        acceptCommand();
                         return;
                     }
                     picker?.handleInput(data);
