@@ -84,6 +84,7 @@ import {
     dispatchPlan,
     ensureConfig,
     focusedEditor,
+    isMountedEditor,
     isPrintableKey,
     leaderIndicator,
     loadConfig,
@@ -505,7 +506,7 @@ export default function (pi: ExtensionAPI) {
                         new Text(
                             theme.fg(
                                 "dim",
-                                "type to filter • ↑↓ navigate • enter select • esc cancel",
+                                "type to filter • ↑↓ navigate • tab fill • enter insert • esc cancel",
                             ),
                             1,
                             0,
@@ -532,6 +533,20 @@ export default function (pi: ExtensionAPI) {
                 return;
             }
             const entry = menu.find((e) => e.value === picked);
+            // Put the command in the editor instead of echoing it: the
+            // caller is standing at the prompt about to type it, and pi's
+            // own autocomplete completes into the editor the same way.
+            // Only when the editor is empty or already holds a command —
+            // appending to unrelated text would produce a line pi cannot
+            // run.
+            const editor = ctx.ui.getEditorComponent?.();
+            if (editor && isMountedEditor(editor)) {
+                const draft = editor.getText().trim();
+                if (draft === "" || draft.startsWith("/")) {
+                    editor.setText(`${draft}${draft ? " " : ""}/${picked} `);
+                    return;
+                }
+            }
             ctx.ui.notify(
                 `/${picked}${entry?.description ? ` — ${entry.description}` : ""}`,
                 "info",

@@ -23,6 +23,7 @@ import {
     isProperPrefix,
     loadConfig,
     saveBinding,
+    splitCommandLine,
     validateSequence,
     type BindingAction,
     type CommandMenuEntry,
@@ -100,9 +101,10 @@ function makeEditor(
 
 /**
  * Fuzzy-filtered command picker: query line + SelectList over `menu`.
- * Shared by /leader-commands (enter on a selection = pick) and the
- * wizard's command step (enter = fill query; the caller confirms when
- * the query starts with "/"). Query state lives in the caller.
+ * Shared by /leader-commands (enter or tab on a selection = pick) and
+ * the wizard's command step (tab completes the highlighted entry into
+ * the query line, the caller then confirms). Query state lives in the
+ * caller.
  */
 export function makeCommandPicker(
     theme: Theme,
@@ -136,9 +138,24 @@ export function makeCommandPicker(
     return {
         render: (w: number) => container.render(w),
         invalidate: () => container.invalidate(),
+        /**
+         * The highlighted match, or null when the filter matches none.
+         * Rebuilt on every keystroke, so it always reflects the query
+         * the user is looking at.
+         */
+        selectedValue: (): string | null =>
+            list.getSelectedItem()?.value ?? null,
         handleInput: (data: string) => {
             if (matchesKey(data, "escape")) {
                 opts.onCancel();
+                return;
+            }
+            // Tab completes the highlighted entry into the query line,
+            // the way pi's own command autocomplete does. SelectList
+            // only knows enter, so tab would otherwise do nothing.
+            if (matchesKey(data, Key.tab)) {
+                const item = list.getSelectedItem();
+                if (item) opts.onPick(item.value);
                 return;
             }
             if (data === "\x7f") {
@@ -530,13 +547,14 @@ export async function runBindingWizard(
                         query = q;
                     },
                     onPick: (value) => {
-                        query = `/${value}`;
-                        refresh();
+                        commandValue = `/${value}`;
+                        goArgs("");
                     },
                     onCancel: back,
                 });
                 container.addChild(picker);
-                hint = "enter fill command • enter again for args • esc back";
+                hint =
+                    "tab fill highlighted • enter take typed command • esc back";
             }
 
             if (list) container.addChild(list);
@@ -573,21 +591,25 @@ export async function runBindingWizard(
                     return;
                 }
                 if (step === "command") {
-                    if (
-                        matchesKey(data, Key.enter) &&
-                        query.trim().length > 1
-                    ) {
-                        const text = query.trim();
-                        if (!text.startsWith("/")) {
-                            status = "command must start with /";
+                    if (matchesKey(data, Key.enter)) {
+                        // A full "/name [args]" line is taken verbatim —
+                        // this is the path that completes a filter down to
+                        // one match without touching the picker. Anything
+                        // else ("/", "mod", a query matching nothing) takes
+                        // the highlighted entry: re-reading a name-only
+                        // query as a command used to report "command must
+                        // start with /" for text the picker had just
+                        // narrowed to a single match.
+                        const line = splitCommandLine(query);
+                        const command =
+                            line?.command ?? picker?.selectedValue() ?? null;
+                        if (command === null) {
+                            status = "no command matches the filter";
                             refresh();
                             return;
                         }
-                        // Inline args typed in the picker split off into
-                        // the args step (prefilled, still editable).
-                        const ws = text.search(/\s/);
-                        commandValue = ws === -1 ? text : text.slice(0, ws);
-                        goArgs(ws === -1 ? "" : text.slice(ws).trim());
+                        commandValue = command;
+                        goArgs(line?.args ?? "");
                         return;
                     }
                     picker?.handleInput(data);

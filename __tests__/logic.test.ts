@@ -43,6 +43,7 @@ import {
     mergeBinding,
     shouldRestoreDraft,
     saveBinding,
+    splitCommandLine,
     validateSequence,
     type PiCommand,
     type MountedEditor,
@@ -1749,6 +1750,43 @@ section("stripAnsi + capOutput (exec output)");
     assert(capped.startsWith("x".repeat(100)), "cap keeps the head");
     assert(capped.includes("4900 more characters"), `cap reports the tail size: ${capped.slice(-40)}`);
     assertEq(capOutput(long, 100).length < 200, true, "cap is bounded");
+}
+
+section("splitCommandLine");
+
+{
+    // A bare slash, an empty query, and a name-only query are not
+    // command lines: the picker resolves those from its highlighted
+    // match. Reading them as a command is what produced "command must
+    // start with /" for text the picker had already filtered down to a
+    // single match.
+    assertEq(splitCommandLine(""), null, "empty defers to the picker");
+    assertEq(splitCommandLine("/"), null, "bare slash defers to the picker");
+    assertEq(
+        splitCommandLine("model"),
+        null,
+        "name-only query defers to the picker",
+    );
+    assertEq(
+        splitCommandLine("  /mod  "),
+        { command: "/mod", args: "" },
+        "name only, edges trimmed",
+    );
+    assertEq(
+        splitCommandLine("/model opus"),
+        { command: "/model", args: "opus" },
+        "inline args split off",
+    );
+    assertEq(
+        splitCommandLine("/model   opus sonnet"),
+        { command: "/model", args: "opus sonnet" },
+        "interior spacing preserved, edges trimmed",
+    );
+    assertEq(
+        splitCommandLine("/model    "),
+        { command: "/model", args: "" },
+        "trailing space is not an empty args list",
+    );
 }
 
 rmSync(CONFIG_DIR, { recursive: true, force: true });

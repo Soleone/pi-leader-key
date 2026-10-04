@@ -63,7 +63,7 @@ Alternatively, edit `~/.pi/agent/leader-key.json` by hand. Discover available
 slash commands from the environment at runtime rather than trusting any cached
 list:
 
-1. `/leader-commands` — picker over `pi.getCommands()` (extension commands, prompt templates, skills), generated at invocation time; type-to-filter fuzzy-matches names and descriptions; selecting one echoes the exact invokable string to paste into `bindings`
+1. `/leader-commands` — picker over `pi.getCommands()` (extension commands, prompt templates, skills), generated at invocation time; type-to-filter fuzzy-matches names and descriptions; tab fills the highlighted command into the editor, enter inserts it (falling back to an echoed string when the editor holds unrelated text)
 2. `pi list` — installed packages
 3. `grep registerCommand` in extension source files — registered commands
 4. Skill `SKILL.md` files — their registered slash commands
@@ -80,5 +80,6 @@ Test command and dev-install workflow: README, "Development". Facts the README d
 - Graying wraps each rendered line in `ESC[90m` (bright black), not `ESC[2m` (faint): faint only lightens the default foreground, so themed borders and colored text come through untouched. `borderColor` is muted around the `render()` call (`renderEditor()`) and deleted again afterwards when the editor had no border of its own.
 - `borderColor` cannot simply be assigned: it may be an own field, a prototype method, or a getter with no setter, and the wrong write throws out of `render()`. `borderAccess()` classifies it and the write is skipped for anything read-only — the lines still gray, only the border stays. Do not "simplify" that away.
 - The capture overlay takes focus while it is up (that is what keeps the sequence keys from reaching the editor), so a text cursor blinks out for the duration. The editor's text, keybindings, and undo history are untouched. This is the accepted cost of not replacing the editor.
+- The command step routes enter through `splitCommandLine()` in `logic.ts`: a full `/name [args]` line is taken verbatim, anything else (`/`, `mod`, a filter matching nothing) resolves to the picker's highlighted match via `selectedValue()`. Reading a name-only query as a command produced "command must start with /" for text the picker had just filtered down to a single match — the regression came from tightening that check in a fix set, not from pi. SelectList only knows enter, so the picker's tab branch is written out by hand.
 - `leaderIndicator()` in `logic.ts` owns the show-grayed-vs-show-LEADER decision so it is testable without a TUI; the warning about a missing editor is once per extension load, not per session — pi's `session_shutdown` reason enum has no "extension unloaded" case. `session_start` clears the in-flight capture, because a session switch can drop an overlay without resolving it.
 - `__tests__/editor-integration.test.ts` drives pi's real `TuiMainScreen` and `CustomEditor` (the peers are peerDependencies, so a missing peer skips instead of failing). `logic.test.ts` cannot catch a shape mismatch with what pi actually mounts — that file is what catches it.

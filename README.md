@@ -71,7 +71,8 @@ Opens a scrollable picker over every invokable command in the current session �
 
 - **Type to filter** — fuzzy match over names and descriptions
 - Entries show provenance (`extension`, `prompt`, or `skill`) plus the description
-- Selecting an entry echoes the exact invokable string (e.g. `/om:view`) to paste into `bindings` — no typos
+- **Tab** fills the highlighted command into the editor (the same gesture pi's own command autocomplete uses), **Enter** inserts it straight away — the editor is where you were about to type it anyway, so no copying
+- If the editor already holds unrelated text, the pick falls back to echoing the exact invokable string (e.g. `/om:view`) for `bindings` — no typos
 - **+ Add binding**, the first entry, jumps straight into the `/leader-bind` wizard
 
 In non-TUI mode the list is shown as a plain notification instead. Escape cancels.
@@ -81,6 +82,7 @@ In non-TUI mode the list is shown as a plain notification instead. Escape cancel
 Walks you through a binding in one overlay: pick a type (`command` / `action` / `exec`), enter the value (fuzzy command picker, action list, or free-text shell input), choose a key sequence, confirm, done.
 
 - Sequences must be printable ASCII with no spaces; command values must start with `/`
+- In the command step, **Tab** takes the highlighted match, **Enter** takes what you typed (`/name args` splits into command and args). A name-only filter like `mod` resolves to the highlighted `/model` instead of raising a validation error
 - Collisions — exact or prefix overlaps — are shown with the conflicting bindings and require explicit overwrite confirmation
 - The merged config is written to `~/.pi/agent/leader-key.json` and works immediately, no reload
 - Escape walks back a step; cancelling anywhere writes nothing; a corrupt config file is never overwritten

@@ -366,6 +366,33 @@ export function buildCommandMenu(commands: PiCommand[]): CommandMenuEntry[] {
     }));
 }
 
+export interface CommandLine {
+    /** Invokable name including the leading slash. */
+    command: string;
+    /** Args typed inline after the command; "" when there were none. */
+    args: string;
+}
+
+/**
+ * Split a typed command line into command and inline args, or return
+ * null when the text is not a command line yet.
+ *
+ * Only a full "/name" qualifies. A bare "/", an empty query, or a
+ * name-only query ("model") returns null: those mean "take the
+ * highlighted match from the picker", which is the list's call to make.
+ * A name-only query used to be answered with "command must start with
+ * /", which read as a validation failure for text the picker itself
+ * had just filtered down to a single match.
+ */
+export function splitCommandLine(text: string): CommandLine | null {
+    const trimmed = text.trim();
+    if (trimmed.length < 2 || !trimmed.startsWith("/")) return null;
+    const ws = trimmed.search(/\s/);
+    return ws === -1
+        ? { command: trimmed, args: "" }
+        : { command: trimmed.slice(0, ws), args: trimmed.slice(ws).trim() };
+}
+
 // ---------------------------------------------------------------------------
 // Key matching
 // ---------------------------------------------------------------------------
