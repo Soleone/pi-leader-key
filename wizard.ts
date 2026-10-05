@@ -101,7 +101,7 @@ function makeEditor(
 
 /**
  * Fuzzy-filtered command picker: query line + SelectList over `menu`.
- * Shared by /leader-commands and the wizard's command step, with the
+ * Shared by /find-commands and the wizard's command step, with the
  * same two-key contract in both: tab fills the highlighted entry into
  * the query line so the user can read the full command, enter accepts
  * what the query line says. Query state lives in the caller.

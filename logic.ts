@@ -327,7 +327,7 @@ export function shouldRestoreDraft(
 }
 
 // ---------------------------------------------------------------------------
-// Command discovery menu (/leader-commands)
+// Command discovery menu (/find-commands)
 // ---------------------------------------------------------------------------
 
 /**

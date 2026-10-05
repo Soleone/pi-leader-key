@@ -8,7 +8,7 @@ Press the leader key (default `ctrl+space`), then tap a short key sequence to ru
 - **Leader key with multi-key sequences** — `gs` for git status, `m` for the model picker, whatever you like
 - **Bind any slash command** — including commands contributed by other extensions, prompt templates, and skills
 - **Three binding types** — slash commands (with arguments), built-in actions, shell one-liners
-- **Interactive setup** — `/leader-bind` wizard and `/leader-commands` discovery picker, no JSON hand-editing required
+- **Interactive setup** — `/leader-bind` wizard and `/find-commands` discovery picker, no JSON hand-editing required
 - **Safe config** — survives package updates, never overwrites your file, refuses to clobber corrupt configs
 
 ## Why this exists
@@ -63,9 +63,9 @@ Anything you can type after `/` can go behind a key sequence — including comma
 Command bindings run through pi's full editor submit pipeline, exactly as if you had typed the text and pressed Enter — so arguments work too. Put them in the explicit `args` field; the two forms below dispatch byte-identically (`"/model opus"`), and the legacy embedded form keeps loading so existing configs don't break. (pi declines a submit while the editor still holds text, so a `command` binding waits until the box is empty. `action` and `exec` bindings are unaffected — they never go through the editor.)
 
 > [!TIP]
-> Don't guess at command names — run `/leader-commands` to browse everything invokable in your current session, or `/leader-bind` to pick one and bind it in a single flow.
+> Don't guess at command names — run `/find-commands` to browse everything invokable in your current session, or `/leader-bind` to pick one and bind it in a single flow.
 
-## Finding commands: `/leader-commands`
+## Finding commands: `/find-commands`
 
 Opens a scrollable picker over every invokable command in the current session — extension commands, prompt templates, and skills — generated at invocation time, so newly installed packages appear automatically.
 

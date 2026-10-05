@@ -1,5 +1,10 @@
 # Spec: Binding Wizard (`/leader-bind`)
 
+> **Update (2026-09-14):** `/leader-commands` was renamed `/find-commands`.
+> The old name is kept below because this document is the spec as written.
+> The "Deferred" section at the bottom still holds: neither picker is
+> redundant yet.
+
 ## Objective
 
 An interactive wizard that creates leader-key bindings without hand-editing

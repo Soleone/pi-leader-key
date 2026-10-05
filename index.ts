@@ -14,7 +14,7 @@
  * to ~/.pi/agent/leader-key.json — outside the package dir, so it survives
  * updates. The package itself ships no config file.
  *
- * /leader-commands opens a picker over pi.getCommands() for command-binding
+ * /find-commands opens a picker over pi.getCommands() for command-binding
  * discovery; selection echoes the exact invokable string. It also hosts an
  * "Add binding" entry that opens the /leader-bind wizard.
  *
@@ -437,10 +437,10 @@ export default function (pi: ExtensionAPI) {
     });
 
     // ------------------------------------------------------------------
-    // /leader-commands — runtime command discovery
+    // /find-commands — runtime command discovery
     // ------------------------------------------------------------------
 
-    pi.registerCommand("leader-commands", {
+    pi.registerCommand("find-commands", {
         description: "Browse every invokable command for leader-key bindings",
         handler: async (_args, ctx) => {
             const commands = pi.getCommands();

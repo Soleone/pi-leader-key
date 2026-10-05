@@ -387,7 +387,7 @@ section("processKey — edge cases");
 }
 
 // ---------------------------------------------------------------------------
-// buildCommandMenu (/leader-commands discovery)
+// buildCommandMenu (/find-commands discovery)
 // ---------------------------------------------------------------------------
 
 section("buildCommandMenu");
