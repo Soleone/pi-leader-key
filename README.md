@@ -77,6 +77,9 @@ Opens a scrollable picker over every invokable command in the current session â€
 
 In non-TUI mode the list is shown as a plain notification instead. Escape cancels.
 
+> [!NOTE]
+> This command was renamed from `/leader-commands`. The old name no longer resolves â€” the picker browses every command in the session, leader-key related or not. Update any muscle memory, docs, or bindings that reference it.
+
 ## Creating bindings: `/leader-bind`
 
 Walks you through a binding in one overlay: pick a type (`command` / `action` / `exec`), enter the value (fuzzy command picker, action list, or free-text shell input), choose a key sequence, confirm, done.
