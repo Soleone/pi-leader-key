@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `npm test` typechecks (`tsc --noEmit`) before running the suite under `tsx --test`.
+- The wizard's command step is two keys again: **tab** fills the highlighted match into the query line, **enter** commits it to the args step. `/find-commands` shares the contract.
+
+### Changed
+
+- `editorEffect: "grayedOut"` grays whatever editor is mounted, custom ones included, instead of swapping in a copy of pi's default; falls back to the LEADER status line when no editor has focus.
+- `/leader-commands` renamed `/find-commands`. No alias.
+- Config hardening: prototype-polluting binding keys, bindings with more than one type, and non-object `bindings` are reported as dropped with a reason rather than silently ignored; `leaderKey` and both timeouts are validated; saving merges into the raw file so unknown fields and unrecognized bindings survive, and writes atomically.
+- `exec` output is stripped of ANSI escapes and capped.
+
+### Fixed
+
+- Command step no longer answers "command must start with /" when enter is pressed on a name-only filter (`mod` → `/model`).
+- Leader mode no longer loses pasted editor content when a `command` binding runs, and restores the editor effect in a `finally`.
+
 ## [1.2.0] - 2026-09-13
 
 ### Added
