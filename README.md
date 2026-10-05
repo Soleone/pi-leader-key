@@ -123,9 +123,13 @@ A sequence that is also a prefix of a longer binding waits `sequenceTimeoutMs` f
 ## Development
 
 ```bash
-npx tsx __tests__/logic.test.ts   # assert-based suite, no framework
+npm test                          # tsc --noEmit, then the suite under tsx
 pi install /path/to/this/repo     # load as a local package
 ```
+
+`__tests__/logic.test.ts` is the assert-based suite (no framework) and covers the pure half; `editor-integration.test.ts` and `picker-integration.test.ts` ask the installed pi peers real questions and skip when a peer is missing.
+
+Publishing: pushing a `v*` tag publishes to npm through `.github/workflows/publish.yml`, which runs `npm ci && npm test` first — bump `package.json`, date the CHANGELOG section, tag, and let CI do the rest.
 
 Pure logic (config loading, key matching, menu building) lives in `logic.ts`, deliberately free of pi imports so the suite loads standalone under tsx. The `@earendil-works/pi-*` peers are declared in `package.json` and resolved by pi at runtime.
 
