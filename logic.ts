@@ -393,6 +393,23 @@ export function splitCommandLine(text: string): CommandLine | null {
         : { command: trimmed.slice(0, ws), args: trimmed.slice(ws).trim() };
 }
 
+/** Resolve the picker selection when the query is not a full command line. */
+export function resolveCommandSelection(
+    query: string,
+    selectedCommand: string | null,
+): CommandLine | null {
+    const typed = splitCommandLine(query);
+    if (typed) return typed;
+    if (!selectedCommand) return null;
+
+    return {
+        command: selectedCommand.startsWith("/")
+            ? selectedCommand
+            : `/${selectedCommand}`,
+        args: "",
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Key matching
 // ---------------------------------------------------------------------------
